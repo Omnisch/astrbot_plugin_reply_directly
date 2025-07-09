@@ -1,210 +1,157 @@
+# astrbot_plugin_reply_directly/main.py
+
 import asyncio
-import time
 import json
-from typing import Set, Dict, List
+from typing import Set
 
-# AstrBot 核心 API
-from astrbot.api import logger, register, Star, Context, AstrBotConfig
+from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.provider import LLMResponse
-import astrbot.api.message_components as Comp
+from astrbot.api.star import Context, Star, register
 
-# 注册插件
+# ----------------------------
+# 插件元数据和注册
+# ----------------------------
 @register(
-    "ReplyDirectly",  # 插件名
-    "qa296",  # 作者
-    "一个智能回复插件，可以实现免@直接回复和对话后反思追问功能。",  # 描述
-    "1.0.0",  # 版本
-    "https://github.com/qa296/astrbot_plugin_reply_directly"  # 仓库地址
+    "reply_directly",
+    "qa296",
+    "一个能让LLM决定主动回复，并在Bot回复后思考是否追问的插件。",
+    "1.0.0",
+    "https://github.com/qa296/astrbot_plugin_reply_directly",
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        
-        # 用于存储哪些用户（在哪个群）被授权了直接回复
-        # 格式: {"{group_id}_{user_id}"}
-        self.direct_reply_users: Set[str] = set()
+        # 用于存储被LLM指定需要主动回复的用户会话ID
+        # 会话ID (unified_msg_origin) 是 AstrBot 用来唯一标识一个聊天窗口的字符串
+        self.direct_reply_targets: Set[str] = set()
+        logger.info("智能追问插件加载成功。")
 
-        # 用于记录最近的消息，为“反思追问”功能提供上下文
-        # 格式: [{"ts": timestamp, "gid": group_id, "uid": user_id, "name": user_name, "msg": content}]
-        self.message_history: List[Dict] = []
-        
-        logger.info("智能直接回复插件已加载。")
-        logger.info(f"直接回复模式: {'启用' if self.config.get('enable_direct_reply_mode', True) else '禁用'}")
-        logger.info(f"反思追问模式: {'启用' if self.config.get('enable_follow_up_mode', True) else '禁用'}")
-
-
-    # --- 功能1: 直接回复模式 ---
-
-    # 1.1 LLM 函数工具：授权直接回复
-    @filter.llm_tool(name="enable_direct_reply")
-    async def enable_direct_reply(self, event: AstrMessageEvent, reason: str) -> MessageEventResult:
+    # ----------------------------
+    # 功能 1: LLM 函数工具 - 激活主动回复
+    # ----------------------------
+    @filter.llm_tool(name="activate_direct_reply")
+    async def activate_direct_reply(self, event: AstrMessageEvent) -> MessageEventResult:
         """
-        当你认为和一个用户的对话已经非常自然流畅（聊上天了），可以调用此工具来直接回复该用户而无需等待@。
-        
-        Args:
-            reason(string): 你为什么要调用这个工具的理由，例如“与用户xxx的对话非常投机”。
-        """
-        if not self.config.get('enable_direct_reply_mode', True):
-            yield event.plain_result("（管理员禁用了直接回复功能，无法开启。）")
-            return
-            
-        group_id = event.get_group_id() or "private"
-        user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
-        
-        key = f"{group_id}_{user_id}"
-        self.direct_reply_users.add(key)
-        
-        logger.info(f"已为群'{group_id}'中的用户'{user_name}({user_id})'开启直接回复。原因: {reason}")
-        yield event.plain_result(f"（已开启与 {user_name} 的直接畅聊模式！）")
-
-    # 1.2 LLM 函数工具：取消直接回复
-    @filter.llm_tool(name="disable_direct_reply")
-    async def disable_direct_reply(self, event: AstrMessageEvent, reason: str) -> MessageEventResult:
-        """
-        当你认为与用户的直接对话应该结束时，调用此工具来取消直接回复模式。
+        当您认为与用户的对话非常投机，希望在下一次无需用户@就能主动回复时，调用此函数。
+        此函数会将当前用户标记为“直接回复”目标，机器人将在收到该用户的下一条消息时立即响应。
+        此效果仅生效一次。
 
         Args:
-            reason(string): 你为什么要结束直接对话的理由，例如“当前话题已结束”。
+            无
         """
-        group_id = event.get_group_id() or "private"
-        user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
+        user_session_id = event.unified_msg_origin
+        if user_session_id not in self.direct_reply_targets:
+            self.direct_reply_targets.add(user_session_id)
+            logger.info(f"已激活对 {user_session_id} 的直接回复。")
+        
+        # 返回一条消息给用户，告知他们LLM的决定
+        return event.plain_result("好的，我们接着聊。")
 
-        key = f"{group_id}_{user_id}"
-        if key in self.direct_reply_users:
-            self.direct_reply_users.discard(key)
-            logger.info(f"已为群'{group_id}'中的用户'{user_name}({user_id})'关闭直接回复。原因: {reason}")
-            yield event.plain_result(f"（已关闭与 {user_name} 的直接畅聊模式。）")
-        else:
-            yield event.plain_result("（当前未处于直接畅聊模式中。）")
-
-    # 1.3 核心逻辑：拦截消息并判断是否需要直接回复
-    # 使用高优先级，确保在其他处理器（尤其是默认的LLM处理器）之前执行
+    # ----------------------------
+    # 功能 1 的实现: 高优先级事件监听器
+    # ----------------------------
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
-    async def direct_reply_handler(self, event: AstrMessageEvent):
-        if not self.config.get('enable_direct_reply_mode', True):
-            return
+    async def handle_direct_reply(self, event: AstrMessageEvent):
+        """
+        这个高优先级的处理器会先于默认的LLM处理器执行。
+        它检查当前消息的发送者是否在我们的“直接回复”目标列表中。
+        """
+        user_session_id = event.unified_msg_origin
+        if user_session_id in self.direct_reply_targets:
+            logger.info(f"检测到来自 {user_session_id} 的直接回复消息，将交由LLM处理。")
             
-        # 如果消息已经@了bot，则无需处理，交由默认流程
-        if event.is_at_me():
-            return
+            # 从目标集合中移除，确保只生效一次
+            self.direct_reply_targets.remove(user_session_id)
             
-        group_id = event.get_group_id() or "private"
-        user_id = event.get_sender_id()
-        key = f"{group_id}_{user_id}"
-        
-        if key in self.direct_reply_users:
-            logger.info(f"检测到直接回复授权用户 '{event.get_sender_name()}' 的消息，直接交由 LLM 处理。")
-            # 将消息请求发送给LLM
+            # 直接将用户的消息请求LLM进行处理
             yield event.request_llm(prompt=event.message_str)
-            # 停止事件传播，防止消息被其他插件或默认处理器再次处理
+            
+            # 停止事件继续传播，防止被其他处理器（如默认的LLM处理器）再次处理
             event.stop_event()
 
+    # ----------------------------
+    # 功能 2: 智能追问/补充 - 触发器
+    # ----------------------------
+    @filter.after_message_sent()
+    async def on_after_message_sent(self, event: AstrMessageEvent):
+        """
+        在机器人发送任何消息之后，此钩子会被触发。
+        我们在这里创建一个异步任务，在延迟指定时间后检查是否需要追问。
+        """
+        # 我们只关心由LLM生成的、对用户消息的回复
+        # 如果事件结果是LLM请求，说明是机器人回复用户，可以触发追问逻辑
+        if event.has_result() and event.get_result().is_llm_request:
+            asyncio.create_task(self.follow_up_task(event))
 
-    # --- 功能2: 反思追问模式 ---
+    # ----------------------------
+    # 功能 2 的实现: 追问任务
+    # ----------------------------
+    async def follow_up_task(self, event: AstrMessageEvent):
+        """
+        这是一个独立的异步任务，用于执行追问逻辑。
+        """
+        delay = self.config.get("follow_up_delay", 5)
+        logger.info(f"机器人已回复，将在 {delay} 秒后检查是否需要追问...")
+        await asyncio.sleep(delay)
 
-    # 2.1 记录所有消息，用于后续分析
-    # 使用低优先级，确保在所有功能性处理器之后执行
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=-10)
-    async def message_logger(self, event: AstrMessageEvent):
-        # 清理旧消息（例如，只保留最近5分钟的）
-        current_time = time.time()
-        self.message_history = [
-            msg for msg in self.message_history if current_time - msg["ts"] < 300
-        ]
-        
-        self.message_history.append({
-            "ts": current_time,
-            "gid": event.get_group_id() or "private",
-            "uid": event.get_sender_id(),
-            "name": event.get_sender_name(),
-            "msg": event.message_str,
-        })
-
-    # 2.2 监听LLM的回复，触发追问任务
-    @filter.on_llm_response()
-    async def on_bot_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        if not self.config.get('enable_follow_up_mode', True):
+        # 获取刚刚机器人发送的消息内容
+        bot_last_message_obj = event.get_result()
+        if not bot_last_message_obj or not bot_last_message_obj.chain:
+            logger.info("追问检查：机器人上一条消息为空，已跳过。")
+            return
+            
+        # 将消息链转换为纯文本
+        bot_last_message_text = " ".join([comp.text for comp in bot_last_message_obj.chain if hasattr(comp, 'text')])
+        if not bot_last_message_text:
+            logger.info("追问检查：机器人上一条消息不含文本，已跳过。")
             return
 
-        # 只处理助手的有效回复
-        if resp.role == "assistant" and resp.completion_text:
-            bot_message = resp.completion_text
-            # 创建一个后台任务来执行追问逻辑，避免阻塞当前流程
-            asyncio.create_task(self._follow_up_task(event, bot_message))
+        # 获取当前对话的上下文
+        # 您提到的文件 `astrobot/core/conversation_mgr.py` 中定义了对话管理相关逻辑
+        curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+        context_history = []
+        if curr_cid:
+            conversation = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, curr_cid)
+            if conversation and conversation.history:
+                context_history = json.loads(conversation.history)
+        
+        # 准备追问的提示词
+        # 我们将历史记录和机器人刚说的话组合起来，让LLM判断
+        prompt_for_follow_up = f"这是机器人刚才说的话：\n---\n{bot_last_message_text}\n---\n结合以上信息和完整的对话历史，请判断机器人是否需要立即发送一条补充或追问的消息来使对话更流畅或更有深度。如果不需要，或者用户已经回复，请回答 'no'。如果需要，请仅用以下JSON格式回答，不要包含其他任何解释：\n"
+        prompt_for_follow_up += '{"should_reply": true, "content": "你想补充或追问的内容"}'
 
-    # 2.3 追问任务的具体实现
-    async def _follow_up_task(self, original_event: AstrMessageEvent, bot_message: str):
         try:
-            delay = self.config.get('follow_up_delay', 5)
-            await asyncio.sleep(delay)
-
-            # 获取Bot说话之后、现在之前的新消息
-            start_time = time.time() - delay
-            group_id = original_event.get_group_id() or "private"
-            
-            recent_chats = [
-                f'{msg["name"]}: {msg["msg"]}'
-                for msg in self.message_history
-                if msg["ts"] > start_time and msg["gid"] == group_id
-            ]
-
-            # 如果没有新消息，就不需要反思
-            if not recent_chats:
+            # 使用最底层的 text_chat 方法，避免触发其他钩子或函数调用
+            llm_provider = self.context.get_using_provider()
+            if not llm_provider:
+                logger.warning("追问检查：未找到可用的大语言模型提供商。")
                 return
 
-            recent_chats_str = "\n".join(recent_chats)
-            
-            # 构建发送给LLM的Prompt
-            prompt = f"""
-            背景：你是一个聊天机器人。
-            你刚才说了："{bot_message}"
-            在你说话后的这 {delay} 秒内，群里有如下新消息：
-            ---
-            {recent_chats_str}
-            ---
-            任务：请你判断，基于你刚才的回复和这些新消息，你是否需要主动进行追问、澄清或补充回答？
-            请严格按照以下JSON格式回答，不要添加任何额外解释：
-            {{
-                "should_reply": boolean,
-                "content": "如果你认为需要回复，这里是你的回复内容。如果不需要，则留空。"
-            }}
-            """
+            llm_response = await llm_provider.text_chat(
+                prompt=prompt_for_follow_up,
+                contexts=context_history, # 传入历史记录
+                system_prompt="你是一个对话分析助手，你的任务是判断是否需要追问，并严格按照指定JSON格式输出。"
+            )
 
-            logger.info(f"为群'{group_id}'触发反思追问任务。")
-            
-            # 调用LLM进行判断
-            provider = self.context.get_using_provider()
-            if not provider:
-                logger.warning("反思追问失败：未找到可用的大语言模型提供商。")
-                return
-
-            response = await provider.text_chat(prompt=prompt)
-            
             # 解析LLM的JSON响应
+            response_text = llm_response.completion_text
+            if response_text.lower().strip() == 'no':
+                 logger.info("追问检查：LLM认为无需追问。")
+                 return
+
+            # 尝试解析JSON
             try:
-                # 尝试修复不规范的JSON
-                content_str = response.completion_text.strip()
-                if content_str.startswith("```json"):
-                    content_str = content_str[7:]
-                if content_str.endswith("```"):
-                    content_str = content_str[:-3]
-                
-                decision = json.loads(content_str)
-                should_reply = decision.get("should_reply", False)
-                content_to_send = decision.get("content", "").strip()
-
-                if should_reply and content_to_send:
-                    logger.info(f"反思追问结果：需要回复。内容：{content_to_send}")
-                    # 发送追问消息
-                    message_chain = [Comp.Plain(content_to_send)]
-                    await self.context.send_message(original_event.unified_msg_origin, message_chain)
-
-            except (json.JSONDecodeError, AttributeError, KeyError) as e:
-                logger.error(f"解析反思追问LLM的响应失败: {e}\n原始响应: {response.completion_text}")
+                decision = json.loads(response_text)
+                if decision.get("should_reply") and decision.get("content"):
+                    follow_up_content = decision["content"]
+                    logger.info(f"LLM决定进行追问，内容: {follow_up_content}")
+                    # 使用 context.send_message 主动发送消息
+                    await self.context.send_message(event.unified_msg_origin, [follow_up_content])
+                else:
+                    logger.info(f"追问检查：LLM返回了无效的JSON指令: {response_text}")
+            except json.JSONDecodeError:
+                logger.warning(f"追问检查：无法解析LLM返回的JSON: {response_text}")
 
         except Exception as e:
-            logger.error(f"执行反思追问任务时发生未知错误: {e}")
+            logger.error(f"执行追问任务时发生错误: {e}", exc_info=True)

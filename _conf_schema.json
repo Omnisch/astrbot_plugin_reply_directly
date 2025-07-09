@@ -1,20 +1,36 @@
 {
-  "enable_proactive_chat": {
-    "type": "bool",
-    "default": true,
-    "description": "功能开关: 主动聊天模式",
-    "hint": "开启后，LLM可以通过函数工具'start_proactive_chat'，让机器人在下次主动回复用户一次。"
+  "proactive_reply": {
+    "description": "功能一：主动回复。当LLM认为可以和用户深入聊天时，通过函数工具标记用户，使其下次发言时能被主动回复一次。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用/禁用主动回复功能",
+        "type": "bool",
+        "default": true
+      }
+    }
   },
-  "enable_post_response_check": {
-    "type": "bool",
-    "default": true,
-    "description": "功能开关: 响应后检查",
-    "hint": "开启后，机器人在回复后会等待一段时间，然后让LLM判断是否需要补充回答。"
-  },
-  "post_response_delay_seconds": {
-    "type": "float",
-    "default": 5.0,
-    "description": "响应后检查的延迟时间（秒）",
-    "hint": "设置机器人在回复后等待多长时间再进行补充回答的判断。建议值为3-10秒。"
+  "follow_up_reply": {
+    "description": "功能二：追问/补充回复。在Bot回复后，让AI判断是否需要补充说明或追问。",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用/禁用追问/补充回复功能",
+        "type": "bool",
+        "default": true
+      },
+      "delay_seconds": {
+        "description": "Bot回复后，等待多少秒再进行判断",
+        "type": "int",
+        "default": 5,
+        "hint": "建议设置在 3-10 秒之间，避免响应过快或过慢。"
+      },
+      "prompt": {
+        "description": "用于判断是否需要追问/补充的系统提示词",
+        "type": "text",
+        "default": "你是一个对话分析助手。请分析以下最近的对话历史。用户的最后一条消息是：'{user_message}'，你的最后一条回复是：'{bot_message}'。根据你的回复，判断是否需要进行一次补充说明、修正或者追问，以使对话更有深度或更准确。请严格按照以下JSON格式回答，不要添加任何额外说明：\n\n```json\n{\n  \"should_reply\": 布尔值, \n  \"content\": \"如果要补充回答，这里是补充的内容。如果不需要，则留空。\"\n}\n```\n\n对话历史如下：\n{history}",
+        "hint": "这是一个包含占位符 {user_message}, {bot_message} 和 {history} 的模板。插件会自动替换这些值。"
+      }
+    }
   }
 }

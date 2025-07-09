@@ -1,18 +1,20 @@
 {
-  "enable_direct_reply": {
-    "description": "是否启用“主动回复”功能。启用后，LLM可以通过函数工具指定一个用户，Bot将在下一次该用户发言时（无论是否@）主动回复。",
+  "enable_proactive_chat": {
     "type": "bool",
-    "default": true
+    "default": true,
+    "description": "功能开关: 主动聊天模式",
+    "hint": "开启后，LLM可以通过函数工具'start_proactive_chat'，让机器人在下次主动回复用户一次。"
   },
-  "enable_follow_up": {
-    "description": "是否启用“反思追问”功能。启用后，Bot在自己发言后，会等待一段时间，然后思考是否需要补充回答。",
+  "enable_post_response_check": {
     "type": "bool",
-    "default": false
+    "default": true,
+    "description": "功能开关: 响应后检查",
+    "hint": "开启后，机器人在回复后会等待一段时间，然后让LLM判断是否需要补充回答。"
   },
-  "follow_up_delay": {
-    "description": "“反思追问”功能的等待时间（秒）。",
-    "type": "int",
-    "default": 5,
-    "hint": "建议不要设置得太短（<3秒），以免回复过快造成骚扰。"
+  "post_response_delay_seconds": {
+    "type": "float",
+    "default": 5.0,
+    "description": "响应后检查的延迟时间（秒）",
+    "hint": "设置机器人在回复后等待多长时间再进行补充回答的判断。建议值为3-10秒。"
   }
 }

@@ -1,0 +1,5 @@
+name: astrbot_plugin_reply_directly
+author: qa296
+version: 1.0.0
+description: "一个智能回复插件，可以实现免@直接回复和对话后反思追问功能。"
+repo_url: "https://github.com/qa296/astrbot_plugin_reply_directly"

@@ -1,9 +1,18 @@
-# astrbot_plugin_reply_directly/_conf_schema.json
 {
+  "enable_direct_reply": {
+    "description": "是否启用“主动回复”功能。启用后，LLM可以通过函数工具指定一个用户，Bot将在下一次该用户发言时（无论是否@）主动回复。",
+    "type": "bool",
+    "default": true
+  },
+  "enable_follow_up": {
+    "description": "是否启用“反思追问”功能。启用后，Bot在自己发言后，会等待一段时间，然后思考是否需要补充回答。",
+    "type": "bool",
+    "default": false
+  },
   "follow_up_delay": {
-    "description": "机器人发送消息后，等待多少秒后触发追问检查。",
+    "description": "“反思追问”功能的等待时间（秒）。",
     "type": "int",
     "default": 5,
-    "hint": "单位为秒。机器人会在此延迟后，结合上下文和自己刚发的消息，思考是否需要进行补充回答。"
+    "hint": "建议不要设置得太短（<3秒），以免回复过快造成骚扰。"
   }
 }

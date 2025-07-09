@@ -1,6 +1,6 @@
 # astrbot_plugin_reply_directly/metadata.yaml
 name: astrbot_plugin_reply_directly
 author: qa296
-description: 一个能让LLM决定主动回复，并在Bot回复后思考是否追问的插件。
 version: 1.0.0
+description: "一个智能回复插件，可以让LLM决定在特定情境下主动回复用户，或在自己发言后进行反思追问。"
 repo: https://github.com/qa296/astrbot_plugin_reply_directly

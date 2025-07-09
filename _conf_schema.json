@@ -1,0 +1,18 @@
+{
+  "enable_direct_reply_mode": {
+    "description": "是否启用'直接回复'模式？启用后，LLM可以使用函数工具授权对特定用户进行免@回复。",
+    "type": "bool",
+    "default": true
+  },
+  "enable_follow_up_mode": {
+    "description": "是否启用'反思追问'模式？启用后，Bot在回复后会等待一段时间，并根据新消息决定是否追问。",
+    "type": "bool",
+    "default": true
+  },
+  "follow_up_delay": {
+    "description": "在Bot回复后，等待多少秒进行'反思追问'的判断。",
+    "type": "int",
+    "default": 5,
+    "hint": "单位是秒。建议设置在 3-10 秒之间。"
+  }
+}

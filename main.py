@@ -1,164 +1,156 @@
 import asyncio
 import json
-from typing import Set
-
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 
 # 插件元数据注册
 @register(
-    "ReplyDirectly",  # 插件名
-    "YourName",      # 作者名
-    "一个实现主动回复和响应后检查的插件",  # 描述
-    "1.0.0",          # 版本
-    "https://github.com/qa296/astrbot_plugin_reply_directly"  # 仓库地址
+    "ReplyDirectly",
+    "YourName",
+    "一个实现主动回复和追问/补充回复的插件",
+    "1.0.0",
+    "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        # 用于存储哪些用户进入了“主动聊天”模式
-        self.proactive_chat_users: Set[str] = set()
-        logger.info("主动回复插件已加载。")
-        logger.info(f"主动聊天模式: {'启用' if self.config.get('enable_proactive_chat') else '禁用'}")
-        logger.info(f"响应后检查模式: {'启用' if self.config.get('enable_post_response_check') else '禁用'}")
+        # 用于存储被标记进行主动回复的用户
+        # 键是 event.unified_msg_origin，值是 True
+        self.proactive_reply_targets = set()
+        logger.info("主动&补充回复插件已加载。")
 
-    # --- 功能1: 主动聊天模式 ---
+    # 功能1: 通过LLM函数工具标记用户
+    # 这个函数工具会让LLM在认为可以“聊上天”时调用
+    @filter.llm_tool(name="mark_user_for_proactive_reply")
+    async def mark_user_for_proactive_reply(self, event: AstrMessageEvent) -> MessageEventResult:
+        """当LLM认为和用户聊得火热，希望在用户下次发言时主动回应时，调用此工具。这会标记用户，使得机器人下次能主动回复一次。
 
-    @filter.llm_tool(name="start_proactive_chat")
-    async def start_proactive_chat(self, event: AstrMessageEvent) -> MessageEventResult:
-        """
-        当与用户聊天聊得非常投机时，调用此工具。调用后，机器人将在下一次无需@或唤醒词的情况下主动回复该用户一次。
         Args:
-            # 此函数无需参数，它会从事件上下文中自动获取用户信息。
+            reason (string): 简要说明为什么要标记用户，例如“用户情绪高涨，适合继续话题”。
         """
-        if not self.config.get("enable_proactive_chat", False):
-            # 如果功能关闭，静默失败
-            return
+        # 检查功能开关
+        if not self.config.get("proactive_reply", {}).get("enable", False):
+            # 虽然函数工具会被注册，但我们可以在执行时告知LLM功能未开启
+            return event.plain_result("The proactive reply feature is currently disabled.")
 
-        user_id = event.unified_msg_origin
-        self.proactive_chat_users.add(user_id)
-        logger.info(f"用户 [{user_id}] 已被标记为主动聊天对象。")
+        umo = event.unified_msg_origin
+        self.proactive_reply_targets.add(umo)
+        logger.info(f"[主动回复] 已标记用户 {umo} 进行下一次主动回复。")
         
-        # 向用户发送一个确认消息
-        yield event.plain_result("好呀，感觉我们聊得很开心！你接下来可以直接跟我说话，我会回你哦。")
+        # 返回给LLM的信息，表示操作成功。这个消息不会发给用户。
+        return event.plain_result("OK, I have marked the user for a proactive reply on their next message.")
 
+    # 功能1: 监听所有消息，实现主动回复
+    # 使用高优先级(priority>0)确保它在默认LLM请求前执行
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
-    async def handle_proactive_chat(self, event: AstrMessageEvent):
-        """
-        监听所有消息，处理被标记为主动聊天的用户。
-        高优先级(priority=10)确保它在默认的LLM处理之前运行。
-        """
-        if not self.config.get("enable_proactive_chat", False):
+    async def proactive_reply_handler(self, event: AstrMessageEvent):
+        # 检查功能开关
+        if not self.config.get("proactive_reply", {}).get("enable", False):
             return
 
-        # 如果事件已经被唤醒（例如通过@或唤醒词），则不处理，避免重复响应
-        if event.is_wake_up():
-            return
-
-        user_id = event.unified_msg_origin
-        if user_id in self.proactive_chat_users:
-            logger.info(f"检测到主动聊天用户 [{user_id}] 的消息，准备请求LLM。")
-            
-            # 标记后只使用一次，立即移除
-            self.proactive_chat_users.remove(user_id)
-            
-            # 停止事件继续传播，防止其他插件或默认逻辑处理此消息
-            event.stop_event()
-
-            # 直接将用户的消息作为prompt请求LLM
-            yield event.request_llm(
-                prompt=event.get_message_str(),
-                image_urls=[img.url for img in event.get_messages() if isinstance(img, Comp.Image)]
-            )
-
-    # --- 功能2: 响应后检查 ---
-
-    @filter.after_message_sent()
-    async def handle_post_response_check(self, event: AstrMessageEvent):
-        """
-        在机器人发送消息后触发的钩子。
-        """
-        if not self.config.get("enable_post_response_check", False):
-            return
-
-        # 确保是LLM的有效回复，而不是插件发送的指令性消息或空消息
-        result = event.get_result()
-        if not result or not result.get_plain_text():
-            return
+        umo = event.unified_msg_origin
         
-        # 避免对自己生成的追问消息再进行检查，防止无限循环
-        if event.get_extra("is_follow_up"):
+        # 核心逻辑：如果用户在我们的目标集合中，并且没有@机器人或使用唤醒词
+        if umo in self.proactive_reply_targets and not event.is_at_or_wake_command:
+            logger.info(f"[主动回复] 检测到被标记用户 {umo} 发言，将主动回复。")
+            
+            # 移除标记，确保只主动回复一次
+            self.proactive_reply_targets.remove(umo)
+            
+            # 停止事件继续传播，防止触发其他插件或默认的LLM回复
+            event.stop_event()
+            
+            # 直接请求LLM对用户消息进行响应，并把结果发送出去
+            yield event.request_llm(prompt=event.message_str)
+
+    # 功能2: 监听机器人发送消息后的事件
+    # 这是实现“追问/补充”功能的入口点
+    @filter.after_message_sent()
+    async def after_message_sent_handler(self, event: AstrMessageEvent):
+        # 检查功能开关
+        if not self.config.get("follow_up_reply", {}).get("enable", False):
             return
 
-        # 使用 create_task 在后台执行，避免阻塞事件流
-        asyncio.create_task(self._check_follow_up(event))
+        # 确保我们只处理由机器人发送的、有实际内容的回复
+        if event.get_result() and event.get_result().is_send:
+            # 使用 asyncio.create_task 在后台执行，避免阻塞主流程
+            asyncio.create_task(self._handle_follow_up(event))
 
-    async def _check_follow_up(self, event: AstrMessageEvent):
+    async def _handle_follow_up(self, event: AstrMessageEvent):
         """
-        实际执行检查和追问的异步函数。
+        处理追问/补充回复的后台任务
         """
         try:
-            delay = float(self.config.get("post_response_delay_seconds", 5.0))
+            conf = self.config.get("follow_up_reply", {})
+            delay = conf.get("delay_seconds", 5)
+            
+            # 等待配置的秒数
             await asyncio.sleep(delay)
 
-            # 获取刚才的对话上下文
-            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
-            if not curr_cid:
-                return
-            
-            conversation = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, curr_cid)
-            history = json.loads(conversation.history)
-            
-            # 机器人刚刚的回复
-            bot_response_text = event.get_result().get_plain_text()
-            history.append({"role": "assistant", "content": bot_response_text})
-            
-            # 构建询问LLM的prompt
-            prompt_for_check = f"""
-请回顾以下对话历史:
-{json.dumps(history, ensure_ascii=False, indent=2)}
+            # 获取刚刚发送的机器人消息
+            bot_message_result = event.get_result()
+            bot_message_str = "".join([c.text for c in bot_message_result.chain if isinstance(c, Comp.Plain)])
+            if not bot_message_str:
+                logger.debug("[补充回复] Bot发送的消息不含文本，跳过。")
+                return # 如果机器人发的是图片等非文本消息，则不处理
 
-对话刚刚结束，机器人的最后一句回复是：“{bot_response_text}”。
-请你判断，机器人是否需要立即进行一次补充说明或追问，以使对话更连贯或更有帮助？
-请严格按照以下JSON格式回答，不要添加任何其他解释：
-{{
-  "answer": boolean,  // true表示需要补充回答，false表示不需要
-  "content": "string" // 如果需要回答，这里是补充回答的内容；如果不需要，则为空字符串
-}}
-"""
-            logger.info(f"为用户 [{event.unified_msg_origin}] 执行响应后检查...")
-            
-            # 使用底层API调用LLM，避免触发其他钩子
-            llm_response: LLMResponse = await self.context.get_using_provider().text_chat(
-                prompt=prompt_for_check,
-                system_prompt="你是一个对话分析助手，你的任务是判断是否需要补充回答，并以JSON格式输出结果。"
+            # 获取用户的原始消息
+            user_message_str = event.message_str
+
+            # 获取对话历史上下文
+            history = []
+            try:
+                curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+                if curr_cid:
+                    conversation = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, curr_cid)
+                    if conversation and conversation.history:
+                        history = json.loads(conversation.history)
+            except Exception as e:
+                logger.warning(f"[补充回复] 获取对话历史失败: {e}")
+
+            # 构造发送给LLM的Prompt
+            prompt_template = conf.get("prompt", "")
+            final_prompt = prompt_template.format(
+                user_message=user_message_str,
+                bot_message=bot_message_str,
+                history=json.dumps(history, ensure_ascii=False, indent=2)
             )
 
-            # 解析LLM的JSON回答
+            # 直接调用LLM Provider，不通过事件请求，因为我们需要原始的、格式化的回复
+            provider = self.context.get_using_provider()
+            if not provider:
+                logger.warning("[补充回复] 未找到正在使用的LLM Provider。")
+                return
+
+            llm_response = await provider.text_chat(prompt=final_prompt)
             response_text = llm_response.completion_text
-            json_part = response_text[response_text.find('{'):response_text.rfind('}')+1]
-            
-            decision = json.loads(json_part)
-            
-            if decision.get("answer") and decision.get("content"):
-                follow_up_content = decision["content"]
-                logger.info(f"LLM决定进行补充回答，内容: {follow_up_content}")
-                
-                # 使用context.send_message发送主动消息
-                # 这种方式不会再次触发after_message_sent钩子，避免了循环
-                message_chain = [Comp.Plain(text=follow_up_content)]
-                await self.context.send_message(event.unified_msg_origin, message_chain)
 
-        except json.JSONDecodeError:
-            logger.warning("响应后检查：LLM返回的不是有效的JSON，已跳过。")
+            # 解析LLM返回的JSON
+            # LLM有时会用 "```json\n...\n```" 包裹代码，需要提取出来
+            if "```json" in response_text:
+                try:
+                    response_text = response_text.split("```json")[1].split("```")[0].strip()
+                except IndexError:
+                    pass # 如果分割失败，继续尝试直接解析
+            
+            try:
+                data = json.loads(response_text)
+                if data.get("should_reply") and data.get("content"):
+                    logger.info(f"[补充回复] LLM决定进行追问/补充: {data['content']}")
+                    # 使用 self.context.send_message 主动发送消息
+                    # 您提供的文档中有此API: self.context.send_message(unified_msg_origin, chains)
+                    message_chain = [Comp.Plain(text=data['content'])]
+                    await self.context.send_message(event.unified_msg_origin, message_chain)
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                logger.warning(f"[补充回复] 解析LLM的JSON响应失败: {e}。响应原文: '{response_text}'")
+
         except Exception as e:
-            logger.error(f"响应后检查时发生错误: {e}", exc_info=True)
-
+            logger.error(f"[补充回复] 处理追问/补充时发生未知错误: {e}", exc_info=True)
+            
     async def terminate(self):
-        """插件卸载时清理资源"""
-        self.proactive_chat_users.clear()
-        logger.info("主动回复插件已卸载，清理用户状态。")
+        """插件卸载时调用，用于清理资源"""
+        self.proactive_reply_targets.clear()
+        logger.info("主动&补充回复插件已卸载，清理完毕。")

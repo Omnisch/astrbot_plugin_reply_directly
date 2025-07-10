@@ -1,210 +1,231 @@
-# astrbot_plugin_reply_directly/main.py
 import asyncio
 import json
-import time
-from collections import defaultdict
-from typing import Dict, List, Tuple
+from collections import defaultdict, deque
+from typing import Set, Dict, Deque, Tuple, Optional
 
-from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import (MessageEventResult, AstrMessageEvent, filter)
+from astrbot.api import logger, AstrBotConfig
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import Plain
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
 
-# 用于存储功能一的目标用户
-# 结构: { "会话ID": "目标用户ID" }
-# 例如: { "aiocqhttp:group:123456": "987654" }
-direct_reply_targets: Dict[str, str] = {}
+# 用于存储被标记为“沉浸式对话”的会话ID
+# 使用 set 是为了快速查找和删除
+sticky_sessions: Set[str] = set()
 
-# 用于存储功能二的聊天记录
-# 结构: { "会话ID": [(timestamp, user_name, content), ...] }
-chat_history: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
+# 用于存储主动插话的异步任务，防止重复触发
+# key: unified_msg_origin, value: asyncio.Task
+proactive_tasks: Dict[str, asyncio.Task] = {}
 
-# 用于防止并发任务
-analysis_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+# 用于存储每个会话的近期聊天记录
+# key: unified_msg_origin, value: deque of (sender_name, message_str)
+chat_history: Dict[str, Deque[Tuple[str, str]]] = defaultdict(lambda: deque(maxlen=20))
 
 
-@register("DirectReply", "AI", "智能直接回复和主动聊天分析", "1.0.0")
-class DirectReplyPlugin(Star):
+@register(
+    "ReplyDirectly",
+    "YourName",  # 请替换成你的名字
+    "实现沉浸式对话（无需@主动回复一次）和主动插话功能。",
+    "1.0.0",
+    "https://github.com/your/repo" # 请替换成你的仓库地址
+)
+class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.lock = asyncio.Lock()  # 保护 direct_reply_targets 的并发访问
         logger.info("DirectReply 插件已加载。")
 
-    # --- 功能一: 智能直接回复 ---
+    # --- 功能1: 沉浸式对话 ---
 
-    @filter.llm_tool(name="activate_direct_reply")
-    async def activate_direct_reply(self, event: AstrMessageEvent) -> MessageEventResult:
+    @filter.llm_tool(name="enable_direct_reply_once")
+    async def enable_direct_reply(self, event: AstrMessageEvent):
         """
-        当你认为和用户的对话非常流畅，且你期望在用户下一次发言时能直接回复他（即使他没有@你）时，可以调用此函数。
-        这会建立一个临时的直接回复关系，仅生效一次。
+        当您认为与用户的对话非常流畅，并希望在下一次无需用户@您时主动回复时，可以调用此函数。此功能仅生效一次。
+
+        Args:
+            None
         """
-        if not self.config.get("enable_smart_direct_reply", False):
+        if not self.config.get("enable_plugin") or not self.config.get("sticky_reply", {}).get("enable"):
+            return event.plain_result("沉浸式对话功能未开启。")
+        
+        origin = event.unified_msg_origin
+        sticky_sessions.add(origin)
+        logger.info(f"[沉浸式对话] 已为会话 {origin} 开启一次性主动回复。")
+        # 可以选择不回复，或者回复一个简单的确认表情/消息
+        return event.plain_result("👌")
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=1)
+    async def handle_sticky_reply(self, event: AstrMessageEvent):
+        """
+        处理所有消息，检查是否来自被标记的“沉浸式”会话。
+        高优先级(priority=1)确保它在默认LLM处理之前运行。
+        """
+        if not self.config.get("enable_plugin") or not self.config.get("sticky_reply", {}).get("enable"):
             return
 
-        sender_id = event.get_sender_id()
-        session_id = event.unified_msg_origin
-
-        async with self.lock:
-            direct_reply_targets[session_id] = sender_id
-        
-        logger.info(f"[功能一] 已为会话 {session_id} 的用户 {sender_id} 设置下一次直接回复。")
-        # 这个工具本身不产生对用户的可见回复，只是一个状态设置
-        # 但为了符合函数调用规范，我们返回一个空结果，让LLM继续生成文本
-        return event.make_result()
-
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
-    async def handle_direct_reply(self, event: AstrMessageEvent):
-        """
-        监听所有消息，检查是否命中直接回复目标
-        """
-        if not self.config.get("enable_smart_direct_reply", False):
-            return
-        
-        session_id = event.unified_msg_origin
-        sender_id = event.get_sender_id()
-
-        async with self.lock:
-            target_user = direct_reply_targets.get(session_id)
-
-        # 如果当前消息的发送者是目标用户，并且不是命令或@消息
-        if target_user == sender_id and not event.is_at_or_wake_command:
-            logger.info(f"[功能一] 命中直接回复目标！用户: {sender_id}，内容: {event.message_str}")
+        origin = event.unified_msg_origin
+        # 如果会话在我们的集合中，并且这次消息没有@机器人
+        if origin in sticky_sessions and not event.is_wake_up():
+            logger.info(f"[沉浸式对话] 触发对 {origin} 的主动回复。")
+            # 用完一次就移除
+            sticky_sessions.remove(origin)
             
-            # 清除目标，确保只生效一次
-            async with self.lock:
-                if session_id in direct_reply_targets:
-                    del direct_reply_targets[session_id]
-
-            # 阻止事件继续传播，防止默认的LLM回复（如果它也被唤醒的话）
+            # 阻止后续的默认LLM调用，因为我们在这里手动调用
+            event.should_call_llm(False)
+            # 停止事件继续传播，防止其他插件处理
             event.stop_event()
-            
-            # 将用户的消息发给LLM处理并回复
-            yield event.request_llm(prompt=event.message_str)
 
-    # --- 功能二: 主动聊天分析 ---
+            # 手动请求LLM处理这条消息
+            yield event.request_llm(prompt=event.get_message_str())
+
+
+    # --- 功能2: 主动插话 ---
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def record_chat_history(self, event: AstrMessageEvent):
         """
-        记录所有消息，为主动分析做准备
-        priority设得很高（数字越大优先级越低），确保它在最后执行
+        低优先级监听所有消息，用于记录聊天历史和取消正在计时的插话任务。
         """
-        if not self.config.get("enable_proactive_analysis", False):
+        if not self.config.get("enable_plugin") or not self.config.get("proactive_reply", {}).get("enable"):
             return
 
-        session_id = event.unified_msg_origin
-        current_time = int(time.time())
+        origin = event.unified_msg_origin
         
         # 记录消息
-        chat_history[session_id].append(
-            (current_time, event.get_sender_name(), event.message_str)
-        )
+        sender_name = event.get_sender_name() or event.get_sender_id()
+        message_text = event.get_message_str()
+        if message_text:
+            # 更新deque的最大长度以匹配配置
+            proactive_config = self.config.get("proactive_reply", {})
+            history_limit = proactive_config.get("history_limit", 10)
+            if chat_history[origin].maxlen != history_limit:
+                 chat_history[origin] = deque(chat_history[origin], maxlen=history_limit)
 
-        # 清理旧消息，只保留设定窗口内的记录
-        window_size = self.config.get("proactive_analysis_window", 10) + 5 # 加一点buffer
-        chat_history[session_id] = [
-            msg for msg in chat_history[session_id] if current_time - msg[0] <= window_size
-        ]
+            chat_history[origin].append((sender_name, message_text))
+
+        # 如果有新的聊天消息，就取消之前计划的“主动插话”任务，因为对话正在进行
+        if origin in proactive_tasks and not proactive_tasks[origin].done():
+            logger.debug(f"[主动插话] 会话 {origin} 有新消息，取消计时。")
+            proactive_tasks[origin].cancel()
+            del proactive_tasks[origin]
+
 
     @filter.after_message_sent()
-    async def trigger_proactive_analysis(self, event: AstrMessageEvent):
+    async def schedule_proactive_check(self, event: AstrMessageEvent):
         """
-        当机器人发送消息后，触发一个延时任务去分析后续聊天
+        在机器人发送消息后触发，启动一个异步任务来检查是否需要主动插话。
         """
-        if not self.config.get("enable_proactive_analysis", False):
+        if not self.config.get("enable_plugin") or not self.config.get("proactive_reply", {}).get("enable"):
             return
-            
-        delay = self.config.get("proactive_analysis_delay", 5)
-        session_id = event.unified_msg_origin
-
-        logger.info(f"[功能二] Bot在 {session_id} 发言，将在 {delay} 秒后触发主动分析。")
         
-        # 使用create_task创建后台任务，不会阻塞当前流程
-        asyncio.create_task(
-            self.proactive_analysis_task(session_id, delay)
-        )
-
-    async def proactive_analysis_task(self, session_id: str, delay: int):
-        # 等待指定时间
-        await asyncio.sleep(delay)
-        
-        # 尝试获取锁，如果已有任务在分析此会话，则直接返回
-        lock = analysis_locks[session_id]
-        if lock.locked():
-            logger.info(f"[功能二] 会话 {session_id} 已有分析任务在运行，本次跳过。")
+        # 确保事件是由机器人自己发送消息触发的
+        if event.get_sender_id() != event.get_self_id():
             return
 
-        async with lock:
-            logger.info(f"[功能二] 开始分析会话 {session_id} 的聊天记录。")
+        origin = event.unified_msg_origin
+        
+        # 如果已有任务，先取消
+        if origin in proactive_tasks and not proactive_tasks[origin].done():
+            proactive_tasks[origin].cancel()
+
+        # 创建新的计时任务
+        logger.debug(f"[主动插话] 机器人已发言，为会话 {origin} 启动插话检查计时。")
+        task = asyncio.create_task(self._proactive_check(origin, event.get_sender_name()))
+        proactive_tasks[origin] = task
+
+
+    async def _proactive_check(self, origin: str, bot_name: str):
+        """
+        异步检查函数，在延迟后执行。
+        """
+        proactive_config = self.config.get("proactive_reply", {})
+        delay = proactive_config.get("delay_seconds", 5)
+
+        try:
+            await asyncio.sleep(delay)
             
-            # 获取最近的聊天记录
-            window_size = self.config.get("proactive_analysis_window", 10)
-            current_time = int(time.time())
-            
-            relevant_history = [
-                f"{name}: {content}" 
-                for ts, name, content in chat_history[session_id] 
-                if current_time - ts <= window_size
-            ]
-            
-            if not relevant_history:
-                logger.info(f"[功能二] 会话 {session_id} 在时间窗口内无聊天记录，分析结束。")
+            logger.info(f"[主动插话] 检查会话 {origin} 是否需要插话。")
+
+            history = list(chat_history.get(origin, []))
+            if not history:
+                logger.debug(f"[主动插话] {origin} 无历史记录，不插话。")
                 return
 
-            history_str = "\n".join(relevant_history)
+            # 找到机器人最后一次说话的位置
+            last_bot_msg_index = -1
+            for i in range(len(history) - 1, -1, -1):
+                if history[i][0] == bot_name:
+                    last_bot_msg_index = i
+                    break
             
-            # 构建prompt
-            prompt = f"""You are a chat analysis assistant. Your task is to analyze a short chat history that occurs right after I (the bot) have spoken. Decide if I should make a follow-up comment to keep the conversation going or clarify something.
+            # 获取机器人说话之后的新消息
+            new_messages = history[last_bot_msg_index + 1:]
 
-Respond ONLY in valid JSON format with two keys:
-1. "should_reply": A boolean (true or false). Set to true only if a follow-up is truly necessary, helpful, or natural. Do not reply to simple acknowledgements like "好的" or "收到".
-2. "reply_content": A string containing the exact message I should send. If "should_reply" is false, this can be an empty string.
+            if not new_messages:
+                logger.info(f"[主动插话] {origin} 在机器人发言后无新消息，不插话。")
+                return
+                
+            # 格式化新消息给LLM
+            formatted_history = "\n".join([f"{name}: {msg}" for name, msg in new_messages])
+            
+            system_prompt = (
+                "你是一个聊天群的观察者。请分析以下在几秒钟内发生的对话片段。\n"
+                "你的任务是判断，作为一个AI助手，此时主动插话是否自然且有帮助。\n"
+                "如果对话已经结束、话题不适合你介入、或你认为保持沉默更好，你必须仅返回一个JSON对象：{\"should_reply\": false, \"reply_content\": \"\"}。\n"
+                "如果你认为你应该回复，请返回JSON对象：{\"should_reply\": true, \"reply_content\": \"你的回复内容\"}。\n"
+                "你的整个回答必须是一个严格符合此格式的JSON对象，不要添加任何额外的解释或文字。"
+            )
+            
+            prompt = f"这是最近的对话：\n---\n{formatted_history}\n---\n根据以上内容，请做出你的判断。"
+            
+            logger.debug(f"[主动插话] 发送给LLM的提示词: {prompt}")
 
-Here is the recent chat history (most recent at the bottom):
----
-{history_str}
----
-Analyze the above and provide your JSON response."""
+            # 直接调用LLM provider
+            llm_response: Optional[LLMResponse] = await self.context.get_using_provider().text_chat(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                contexts=[] # 我们只关心当前片段，不使用历史上下文
+            )
 
+            if not llm_response or not llm_response.completion_text:
+                logger.warning("[主动插话] LLM没有返回有效内容。")
+                return
+            
             try:
-                # 使用底层LLM接口，因为我们需要解析返回的JSON
-                provider = self.context.get_using_provider()
-                if not provider:
-                    logger.warning("[功能二] 未找到可用的大语言模型提供商。")
-                    return
+                decision = json.loads(llm_response.completion_text)
+                should_reply = decision.get("should_reply", False)
+                reply_content = decision.get("reply_content", "")
 
-                response: LLMResponse = await provider.text_chat(prompt=prompt)
-                
-                # 清理和解析JSON
-                content = response.completion_text.strip()
-                if content.startswith("```json"):
-                    content = content[7:]
-                if content.endswith("```"):
-                    content = content[:-3]
-                
-                analysis_result = json.loads(content)
-
-                if analysis_result.get("should_reply") and analysis_result.get("reply_content"):
-                    reply_text = analysis_result["reply_content"]
-                    logger.info(f"[功能二] LLM决定主动回复: {reply_text}")
-                    # 主动发送消息
-                    from astrbot.api.message_components import Plain
-                    await self.context.send_message(session_id, [Plain(reply_text)])
+                if should_reply and reply_content:
+                    logger.info(f"[主动插话] LLM决定插话，内容: {reply_content}")
+                    message_chain = [Plain(text=reply_content)]
+                    # 使用 context.send_message 主动发送消息
+                    await self.context.send_message(origin, message_chain)
                 else:
-                    logger.info(f"[功能二] LLM决定不进行主动回复。")
+                    logger.info("[主动插话] LLM决定不插话。")
+                    
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"[主动插话] LLM返回的不是有效的JSON格式: {llm_response.completion_text} | 错误: {e}")
 
-            except json.JSONDecodeError as e:
-                logger.error(f"[功能二] LLM返回的不是有效的JSON: {response.completion_text}, 错误: {e}")
-            except Exception as e:
-                logger.error(f"[功能二] 主动分析任务出现未知错误: {e}")
-
+        except asyncio.CancelledError:
+            logger.debug(f"[主动插话] 会话 {origin} 的检查任务被取消。")
+        except Exception as e:
+            logger.error(f"[主动插话] 检查过程中发生未知错误: {e}", exc_info=True)
+        finally:
+            # 任务结束或被取消后，从字典中移除
+            if origin in proactive_tasks:
+                del proactive_tasks[origin]
 
     async def terminate(self):
-        """插件卸载/停用时调用"""
-        logger.info("DirectReply 插件已卸载。")
-        # 清理状态
-        global direct_reply_targets, chat_history, analysis_locks
-        direct_reply_targets.clear()
+        """
+        插件卸载或停用时调用，清理资源。
+        """
+        logger.info("DirectReply 插件正在卸载...")
+        # 取消所有正在运行的计时任务
+        for task in proactive_tasks.values():
+            if not task.done():
+                task.cancel()
+        proactive_tasks.clear()
+        sticky_sessions.clear()
         chat_history.clear()
-        analysis_locks.clear()
+        logger.info("DirectReply 插件资源已清理。")

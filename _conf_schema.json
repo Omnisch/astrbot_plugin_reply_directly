@@ -1,4 +1,3 @@
-// astrbot_plugin_reply_directly/_conf_schema.json
 {
   "enable_smart_direct_reply": {
     "description": "【功能一】开启智能直接回复",

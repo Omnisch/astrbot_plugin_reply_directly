@@ -3,7 +3,8 @@ import json
 import time
 from collections import deque
 
-from astrbot.api import logger, AstrBotConfig, MessageType
+from astrbot.api import logger, AstrBotConfig
+from astrbot.api.event import MessageType
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import LLMResponse

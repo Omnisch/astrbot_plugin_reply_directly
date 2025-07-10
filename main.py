@@ -51,8 +51,7 @@ class ReplyDirectlyPlugin(Star):
         origin = event.unified_msg_origin
         sticky_sessions.add(origin)
         logger.info(f"[沉浸式对话] 已为会话 {origin} 开启一次性主动回复。")
-        # 可以选择不回复，或者回复一个简单的确认表情/消息
-        return event.plain_result("👌")
+
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1)
     async def handle_sticky_reply(self, event: AstrMessageEvent):

@@ -80,8 +80,7 @@ class ReplyDirectlyPlugin(Star):
             delay = self.config.get('proactive_reply_delay', 8)
             await asyncio.sleep(delay)
 
-            # 计时结束，从活跃列表中移除
-            self.active_timers.pop(group_id, None)
+
             
             chat_history = self.group_chat_buffer.pop(group_id, [])
             if not chat_history:

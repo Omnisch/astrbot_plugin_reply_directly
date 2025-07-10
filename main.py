@@ -23,11 +23,11 @@ chat_history: Dict[str, Deque[Tuple[str, str]]] = defaultdict(lambda: deque(maxl
 
 
 @register(
-    "ReplyDirectly",
-    "YourName",  # 请替换成你的名字
+    "astrbot_plugin_reply_directly",
+    "qa296",  
     "实现沉浸式对话（无需@主动回复一次）和主动插话功能。",
     "1.0.0",
-    "https://github.com/your/repo" # 请替换成你的仓库地址
+    "https://github.com/qa296/astrbot_plugin_reply_directly" 
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):

@@ -1,43 +1,57 @@
-{
-  "enable_plugin": {
-    "description": "插件总开关",
-    "type": "bool",
-    "default": true
-  },
-  "sticky_reply": {
-    "description": "沉浸式对话设置",
-    "type": "object",
-    "items": {
-      "enable": {
-        "description": "开启沉浸式对话功能",
-        "type": "bool",
-        "hint": "开启后，LLM可以通过函数工具'enable_direct_reply_once'来让机器人下次主动回复（无需@）。",
-        "default": true
-      }
-    }
-  },
-  "proactive_reply": {
-    "description": "主动插话设置",
-    "type": "object",
-    "items": {
-      "enable": {
-        "description": "开启主动插话功能",
-        "type": "bool",
-        "hint": "开启后，机器人会在自己发言后，根据一小段时间内的后续聊天内容，判断是否要主动插话。",
-        "default": true
-      },
-      "delay_seconds": {
-        "description": "延迟时间（秒）",
-        "type": "int",
-        "hint": "机器人发言后，等待多少秒再检查聊天记录。",
-        "default": 5
-      },
-      "history_limit": {
-        "description": "分析历史消息数量",
-        "type": "int",
-        "hint": "最多分析最近多少条消息来决定是否插话。",
-        "default": 10
-      }
-    }
-  }
-}
+# Reply Directly Plugin for AstrBot
+
+一个为 AstrBot 开发的插件，旨在增强机器人的对话流畅性和主动性。
+
+仓库地址: [https://github.com/qa296/astrbot_plugin_reply_directly](https://github.com/qa296/astrbot_plugin_reply_directly)
+
+## 功能
+
+本插件包含两个核心功能，均可在插件配置中独立开关。
+
+### 1. 沉浸式对话 (Sticky Reply)
+
+- **作用**: 让机器人可以在一次对话中“记住”用户，并在下一次用户发言时，即使没有被`@`，也能主动进行回复。这对于引导多轮对话非常有用。
+- **触发方式**: 大语言模型（LLM）在对话中认为需要开启沉浸式对话时，通过调用名为 `enable_direct_reply_once` 的函数工具来激活。
+- **效果**: 激活后，机器会等待当前会话（私聊或群聊）的下一次消息，并主动对其进行回复。此效果仅生效一次。
+
+### 2. 主动插话 (Proactive Reply)
+
+- **作用**: 让机器人在群聊中表现得更像一个真实的参与者。在它自己发完言后，会“聆听”一小段时间，如果发现群友的讨论和它刚才的话题相关或有补充的价值，它会主动进行插话。
+- **触发方式**: 机器人自己在群里发送消息后自动触发。
+- **流程**:
+    1. 机器人发言。
+    2. 等待 `delay_seconds`（可配置，默认5秒）。
+    3. 收集这期间的新聊天记录。
+    4. 将记录发送给LLM，让LLM判断是否应该插话以及说什么。
+    5. 如果LLM决定插话，机器人会主动发送消息。
+
+## 安装
+
+1.  下载插件包（或通过 `git clone`）。
+2.  将 `astrbot_plugin_reply_directly` 文件夹放入 AstrBot 的 `data/plugins/` 目录下。
+3.  重启 AstrBot 或在 WebUI 的插件管理页面点击“重载插件列表”。
+4.  在插件列表中找到本插件并启用。
+
+## 配置
+
+在 AstrBot WebUI 的插件管理页面，找到本插件并点击“管理”即可看到以下配置项：
+
+-   `插件总开关`: 控制整个插件的启用和禁用。
+-   **沉浸式对话设置**:
+    -   `开启沉浸式对话功能`: 开启或关闭此功能。
+-   **主动插话设置**:
+    -   `开启主动插话功能`: 开启或关闭此功能。
+    -   `延迟时间（秒）`: 机器人发言后，等待多少秒再检查聊天记录。
+    -   `分析历史消息数量`: 最多分析最近多少条消息来决定是否插话。
+
+## 对开发者的提示 (LLM Prompt Engineering)
+
+为了让大语言模型（LLM）能正确使用本插件的功能，您可以在您的 `System Prompt` 中加入以下或类似的描述：
+
+### 沉浸式对话
+
+> 你拥有一个名为 `enable_direct_reply_once` 的函数工具。当你认为需要引导用户进行下一轮对话，或者你的回答需要用户紧接着进行补充说明时，你可以调用此函数。调用后，我（机器人）会在用户下一次发言时主动回复，无需等待用户@我。请注意，这个效果只持续一次。
+
+### 主动插话
+
+> 当你在群聊中发言后，我会观察一小段时间内的后续聊天。我会将这些聊天记录发给你，并让你以JSON格式（`{"should_reply": boolean, "content": "string"}`）判断是否需要主动插话。请根据上下文，做出自然的、有价值的补充或回应。

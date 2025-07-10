@@ -1,26 +1,43 @@
 {
-  "enable_smart_direct_reply": {
-    "description": "【功能一】开启智能直接回复",
+  "enable_plugin": {
+    "description": "插件总开关",
     "type": "bool",
-    "default": true,
-    "hint": "开启后，LLM可以通过函数工具指定某个用户，在下一次发言时，机器人会直接回复他，无需@。"
+    "default": true
   },
-  "enable_proactive_analysis": {
-    "description": "【功能二】开启主动聊天分析",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，当机器人发完言，会等待一段时间，然后分析期间的聊天记录，决定是否需要主动进行补充回答。"
+  "sticky_reply": {
+    "description": "沉浸式对话设置",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "开启沉浸式对话功能",
+        "type": "bool",
+        "hint": "开启后，LLM可以通过函数工具'enable_direct_reply_once'来让机器人下次主动回复（无需@）。",
+        "default": true
+      }
+    }
   },
-  "proactive_analysis_delay": {
-    "description": "【功能二配置】主动分析延迟（秒）",
-    "type": "int",
-    "default": 5,
-    "hint": "机器人发言后，等待多少秒再开始分析。这个值就是你提到的5s，可以自己修改。"
-  },
-  "proactive_analysis_window": {
-    "description": "【功能二配置】分析的聊天记录时间窗口（秒）",
-    "type": "int",
-    "default": 10,
-    "hint": "当触发主动分析时，收集过去多少秒的聊天记录进行分析。建议大于等于延迟时间。"
+  "proactive_reply": {
+    "description": "主动插话设置",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "开启主动插话功能",
+        "type": "bool",
+        "hint": "开启后，机器人会在自己发言后，根据一小段时间内的后续聊天内容，判断是否要主动插话。",
+        "default": true
+      },
+      "delay_seconds": {
+        "description": "延迟时间（秒）",
+        "type": "int",
+        "hint": "机器人发言后，等待多少秒再检查聊天记录。",
+        "default": 5
+      },
+      "history_limit": {
+        "description": "分析历史消息数量",
+        "type": "int",
+        "hint": "最多分析最近多少条消息来决定是否插话。",
+        "default": 10
+      }
+    }
   }
 }

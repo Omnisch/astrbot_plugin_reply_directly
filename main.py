@@ -1,8 +1,9 @@
 import asyncio
 import json
+import re  # <--- 步骤1: 新增导入
 from collections import defaultdict
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
@@ -11,20 +12,42 @@ import astrbot.api.message_components as Comp
     "reply_directly",
     "qa296",
     "提供沉浸式对话和主动插话功能，让机器人更智能地参与群聊。",
-    "1.0.0",
+    "1.0.1", # 建议更新版本号
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        # 用于沉浸式对话：存储需要直接回复的群组ID
         self.direct_reply_groups = set()
-        # 用于主动插话：存储活跃的计时器任务 {group_id: asyncio.Task}
         self.active_timers = {}
-        # 用于主动插话：存储计时器期间的聊天记录 {group_id: [messages]}
         self.group_chat_buffer = defaultdict(list)
         logger.info("ReplyDirectly插件加载成功！")
+
+    # <--- 步骤2: 新增一个辅助函数来提取JSON ---
+    def _extract_json_from_text(self, text: str) -> str:
+        """
+        从可能包含Markdown代码块的文本中稳健地提取纯JSON字符串。
+        """
+        # 优先匹配 ```json ... ``` 格式
+        match = re.search(r'```json\s*([\s\S]*?)\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        # 其次匹配 ``` ... ``` 格式 (没有 'json' 标识)
+        match = re.search(r'```\s*([\s\S]*?)\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        # 如果没有找到Markdown块，尝试寻找第一个 '{' 和最后一个 '}'
+        # 这可以处理一些不规范但仍包含JSON的回复，例如 "好的，这是结果：{...}"
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            return text[start:end+1]
+
+        # 如果以上都不行，返回原始文本，让json.loads自己去尝试最后一次
+        return text
 
     # -----------------------------------------------------
     # Feature 1: 沉浸式对话 (Immersive Chat)
@@ -42,8 +65,6 @@ class ReplyDirectlyPlugin(Star):
         if group_id:
             logger.info(f"[沉浸式对话] 已为群 {group_id} 开启单次直接回复模式。")
             self.direct_reply_groups.add(group_id)
-        # 这个函数工具只设置一个状态，不产生任何需要发送的消息
-        # 因此这里不需要 yield event.plain_result()
 
     # -----------------------------------------------------
     # Feature 2: 主动插话 (Proactive Interjection)
@@ -54,21 +75,16 @@ class ReplyDirectlyPlugin(Star):
         """机器人发送消息后，启动主动插话的计时器"""
         if not self.config.get('enable_plugin', True) or not self.config.get('enable_proactive_reply', True):
             return
-
-        # 此功能只在群聊中生效
         if event.is_private_chat():
             return
-
         group_id = event.get_group_id()
         if not group_id:
             return
 
-        # 如果该群已有计时器，取消旧的
         if group_id in self.active_timers:
             self.active_timers[group_id].cancel()
             logger.debug(f"[主动插话] 取消了群 {group_id} 的旧计时器。")
 
-        # 清空该群的旧聊天记录缓冲区并启动新计时器
         self.group_chat_buffer[group_id].clear()
         task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
         self.active_timers[group_id] = task
@@ -80,8 +96,7 @@ class ReplyDirectlyPlugin(Star):
             delay = self.config.get('proactive_reply_delay', 8)
             await asyncio.sleep(delay)
 
-
-            
+            self.active_timers.pop(group_id, None)
             chat_history = self.group_chat_buffer.pop(group_id, [])
             if not chat_history:
                 logger.info(f"[主动插话] 群 {group_id} 在 {delay}s 内无新消息，不进行判断。")
@@ -89,7 +104,6 @@ class ReplyDirectlyPlugin(Star):
 
             logger.info(f"[主动插话] 群 {group_id} 计时结束，收集到 {len(chat_history)} 条消息，开始请求LLM判断。")
             
-            # 构建发送给LLM的prompt
             formatted_history = "\n".join(chat_history)
             prompt = (
                 f"我在一个群聊里，在我说完话后，群里发生了以下的对话：\n"
@@ -98,7 +112,6 @@ class ReplyDirectlyPlugin(Star):
                 f'{{"should_reply": 布尔值, "content": "如果should_reply为true，这里是你的回复内容，否则为空字符串"}}'
             )
 
-            # 使用底层API调用LLM
             provider = self.context.get_using_provider()
             if not provider:
                 logger.warning("[主动插话] 未找到可用的大语言模型提供商。")
@@ -106,29 +119,41 @@ class ReplyDirectlyPlugin(Star):
                 
             llm_response = await provider.text_chat(prompt=prompt)
             
-            # 解析LLM的JSON回复
+            # <--- 步骤3: 修改这里的JSON解析逻辑 ---
+            json_string = "" # 初始化以备在错误日志中使用
             try:
-                decision_data = json.loads(llm_response.completion_text)
+                # 先使用辅助函数清理和提取JSON字符串
+                json_string = self._extract_json_from_text(llm_response.completion_text)
+                
+                # 如果清理后字符串为空，则直接返回
+                if not json_string:
+                    logger.warning(f"[主动插话] 从LLM回复中未能提取出有效内容。原始回复: {llm_response.completion_text}")
+                    return
+
+                decision_data = json.loads(json_string)
                 should_reply = decision_data.get("should_reply", False)
                 content = decision_data.get("content", "")
 
                 if should_reply and content:
                     logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
-                    # 使用context发送主动消息
                     message_chain = [Comp.Plain(text=content)]
                     await self.context.send_message(unified_msg_origin, message_chain)
                 else:
                     logger.info("[主动插话] LLM判断无需回复。")
 
             except (json.JSONDecodeError, TypeError, AttributeError) as e:
-                logger.error(f"[主动插话] 解析LLM的JSON回复失败: {e}\n原始回复: {llm_response.completion_text}")
+                # 改进错误日志，同时显示原始回复和清理后尝试解析的文本
+                logger.error(
+                    f"[主动插话] 解析LLM的JSON回复失败: {e}\n"
+                    f"原始回复: {llm_response.completion_text}\n"
+                    f"清理后尝试解析的文本: '{json_string}'"
+                )
 
         except asyncio.CancelledError:
             logger.info(f"[主动插话] 群 {group_id} 的任务被取消。")
         except Exception as e:
             logger.error(f"[主动插话] 任务执行出现未知异常: {e}", exc_info=True)
         finally:
-            # 确保任务结束后清理资源
             self.active_timers.pop(group_id, None)
             self.group_chat_buffer.pop(group_id, None)
 
@@ -143,23 +168,20 @@ class ReplyDirectlyPlugin(Star):
             return
 
         group_id = event.get_group_id()
-        # 忽略机器人自己发的消息
         if event.get_sender_id() == event.get_self_id():
             return
 
-        # 检查是否需要沉浸式回复
         if self.config.get('enable_immersive_chat', True) and group_id in self.direct_reply_groups:
             logger.info(f"[沉浸式对话] 检测到群 {group_id} 的直接回复消息，触发LLM。")
-            self.direct_reply_groups.remove(group_id)  # 移除，确保只生效一次
-            event.stop_event()  # 阻止事件继续传播，防止被其他插件或默认逻辑处理
+            self.direct_reply_groups.remove(group_id)
+            event.stop_event()
             yield event.request_llm(prompt=event.message_str)
-            return  # 已经处理，直接返回
+            return
 
-        # 检查是否需要为主动插话功能记录消息
         if self.config.get('enable_proactive_reply', True) and group_id in self.active_timers:
             sender_name = event.get_sender_name()
             message_text = event.message_str
-            if message_text: # 只记录有文本内容的消息
+            if message_text:
                 self.group_chat_buffer[group_id].append(f"{sender_name}: {message_text}")
 
     # -----------------------------------------------------

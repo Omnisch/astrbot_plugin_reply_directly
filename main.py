@@ -3,7 +3,7 @@ import json
 import re
 from collections import defaultdict
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
@@ -132,8 +132,8 @@ class ReplyDirectlyPlugin(Star):
 
             if should_reply and content:
                 logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
-                # <--- 步骤2: 修改这里，使用 Message() 包装消息组件列表
-                message_to_send = Message([Comp.Plain(text=content)])
+                # 使用 MessageChain().message() 来构建一个包含纯文本的 MessageChain 对象
+                message_to_send = MessageChain().message(content)
                 await self.context.send_message(unified_msg_origin, message_to_send)
             else:
                 logger.info("[主动插话] LLM判断无需回复。")

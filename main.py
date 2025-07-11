@@ -13,7 +13,7 @@ import astrbot.api.message_components as Comp
     "reply_directly",
     "qa296",
     "提供沉浸式对话和主动插话功能，让机器人更智能地参与群聊。",
-    "1.1.0", # 版本号+1
+    "1.0.1", # 版本号+1
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):

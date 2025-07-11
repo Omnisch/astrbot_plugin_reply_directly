@@ -3,17 +3,17 @@ import json
 import re
 from collections import defaultdict
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
-from astrbot.api.message import Message  # <--- 步骤1: 新增导入
+from astrbot.api.message_components import MessageChain
 
 @register(
     "reply_directly",
     "qa296",
     "提供沉浸式对话和主动插话功能，让机器人更智能地参与群聊。",
-    "1.0.2", # 建议更新版本号
+    "1.0.0", 
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):
@@ -132,7 +132,7 @@ class ReplyDirectlyPlugin(Star):
 
             if should_reply and content:
                 logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
-                # 使用 MessageChain().message() 来构建一个包含纯文本的 MessageChain 对象
+                # 这行代码现在可以正常工作了，因为它依赖于正确的 MessageChain 导入
                 message_to_send = MessageChain().message(content)
                 await self.context.send_message(unified_msg_origin, message_to_send)
             else:

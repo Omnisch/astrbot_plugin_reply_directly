@@ -1,5 +1,5 @@
 name: astrbot_plugin_reply_directly
 author: qa296
-version: 1.0.0
+version: 1.0.1
 description: "一个智能回复插件，可以让LLM决定在特定情境下主动回复用户，或在自己发言后进行反思追问。"
 repo: https://github.com/qa296/astrbot_plugin_reply_directly

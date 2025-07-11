@@ -7,19 +7,28 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
-from astrbot.api.message_components import MessageChain
 
 @register(
     "reply_directly",
     "qa296",
     "提供沉浸式对话和主动插话功能，让机器人更智能地参与群聊。",
-    "1.0.0", 
+    "1.0.1",
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.config = config
+        
+        # 默认配置
+        self.default_config = {
+            'enable_plugin': True,
+            'enable_immersive_chat': True,
+            'enable_proactive_reply': True,
+            'proactive_reply_delay': 8
+        }
+        # 合并用户配置和默认配置
+        self.config = {**self.default_config, **config}
+
         self.direct_reply_groups = set()
         self.active_timers = {}
         self.group_chat_buffer = defaultdict(list)
@@ -29,17 +38,27 @@ class ReplyDirectlyPlugin(Star):
         """
         从可能包含Markdown代码块的文本中稳健地提取纯JSON字符串。
         """
-        match = re.search(r'```json\s*([\s\S]*?)\s*```', text, re.DOTALL)
+        # 模式1: 优先匹配 ```json ... ``` 格式
+        pattern1 = r'```json\s*(.*?)\s*```'
+        match = re.search(pattern1, text, re.DOTALL)
         if match:
             return match.group(1).strip()
-        match = re.search(r'```\s*([\s\S]*?)\s*```', text, re.DOTALL)
+
+        # 模式2: 其次匹配 ``` ... ``` 格式 (没有 'json' 标识)
+        pattern2 = r'```\s*(.*?)\s*```'
+        match = re.search(pattern2, text, re.DOTALL)
         if match:
             return match.group(1).strip()
+
+        # 模式3: 如果没有找到Markdown块，尝试寻找第一个 '{' 和最后一个 '}'
+        # 这可以处理一些不规范但仍包含JSON的回复
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1 and end > start:
-            return text[start:end+1]
-        return text
+            return text[start:end+1].strip()
+
+        # 如果以上都不行，返回原始文本的strip版本，让json.loads自己去尝试最后一次
+        return text.strip()
 
     # -----------------------------------------------------
     # Feature 1: 沉浸式对话 (Immersive Chat)
@@ -73,10 +92,12 @@ class ReplyDirectlyPlugin(Star):
         if not group_id:
             return
 
+        # 如果已存在计时器，先取消旧的
         if group_id in self.active_timers:
             self.active_timers[group_id].cancel()
             logger.debug(f"[主动插话] 取消了群 {group_id} 的旧计时器。")
 
+        # 清空历史缓冲区并启动新任务
         self.group_chat_buffer[group_id].clear()
         task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
         self.active_timers[group_id] = task
@@ -88,8 +109,10 @@ class ReplyDirectlyPlugin(Star):
             delay = self.config.get('proactive_reply_delay', 8)
             await asyncio.sleep(delay)
 
+            # 从active_timers中移除自身，表示计时已结束
             self.active_timers.pop(group_id, None)
             chat_history = self.group_chat_buffer.pop(group_id, [])
+            
             if not chat_history:
                 logger.info(f"[主动插话] 群 {group_id} 在 {delay}s 内无新消息，不进行判断。")
                 return
@@ -100,8 +123,9 @@ class ReplyDirectlyPlugin(Star):
             prompt = (
                 f"我在一个群聊里，在我说完话后，群里发生了以下的对话：\n"
                 f"--- 对话记录 ---\n{formatted_history}\n--- 对话记录结束 ---\n"
-                f"请你判断我是否应该根据以上对话内容进行插话回复。请严格按照以下JSON格式回答，不要添加任何其他说明：\n"
-                f'{{"should_reply": 布尔值, "content": "如果should_reply为true，这里是你的回复内容，否则为空字符串"}}'
+                f"请判断我是否应该插话。请严格按照JSON格式在```json ... ```代码块中回答，不要有任何其他说明文字。\n"
+                f'格式示例：\n```json\n{{"should_reply": true, "content": "你的回复内容"}}\n```\n'
+                f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
             )
 
             provider = self.context.get_using_provider()
@@ -114,36 +138,43 @@ class ReplyDirectlyPlugin(Star):
             json_string = ""
             try:
                 json_string = self._extract_json_from_text(llm_response.completion_text)
+                
                 if not json_string:
                     logger.warning(f"[主动插话] 从LLM回复中未能提取出有效内容。原始回复: {llm_response.completion_text}")
                     return
+
+                # 添加更严格的JSON格式检查
+                if not json_string.startswith('{') or not json_string.endswith('}'):
+                    logger.warning(f"[主动插话] 提取的内容不是有效的JSON对象格式。内容: {json_string}")
+                    return
+
                 decision_data = json.loads(json_string)
-            except json.JSONDecodeError as e:
+                should_reply = decision_data.get("should_reply", False)
+                content = decision_data.get("content", "")
+
+                if should_reply and content:
+                    logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
+                    # 使用 from astrbot.api.event import MessageChain 也是可以的
+                    message_chain = [Comp.Plain(text=content)]
+                    await self.context.send_message(unified_msg_origin, message_chain)
+                else:
+                    logger.info("[主动插话] LLM判断无需回复。")
+
+            except (json.JSONDecodeError, TypeError, AttributeError) as e:
                 logger.error(
                     f"[主动插话] 解析LLM的JSON回复失败: {e}\n"
                     f"原始回复: {llm_response.completion_text}\n"
                     f"清理后尝试解析的文本: '{json_string}'"
                 )
-                return # 解析失败，直接返回
-
-            # --- 从这里开始，JSON解析已经成功，处理后续逻辑 ---
-            should_reply = decision_data.get("should_reply", False)
-            content = decision_data.get("content", "")
-
-            if should_reply and content:
-                logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
-                # 这行代码现在可以正常工作了，因为它依赖于正确的 MessageChain 导入
-                message_to_send = MessageChain().message(content)
-                await self.context.send_message(unified_msg_origin, message_to_send)
-            else:
-                logger.info("[主动插话] LLM判断无需回复。")
 
         except asyncio.CancelledError:
             logger.info(f"[主动插话] 群 {group_id} 的任务被取消。")
+        except asyncio.TimeoutError:
+            logger.warning(f"[主动插话] 群 {group_id} 的LLM请求超时。")
         except Exception as e:
-            # 这里的日志现在能更准确地捕捉到非JSON解析的错误
             logger.error(f"[主动插话] 任务执行出现未知异常: {e}", exc_info=True)
         finally:
+            # 确保无论成功还是失败，都清理相关资源
             self.active_timers.pop(group_id, None)
             self.group_chat_buffer.pop(group_id, None)
 
@@ -158,20 +189,27 @@ class ReplyDirectlyPlugin(Star):
             return
 
         group_id = event.get_group_id()
+        # 忽略机器人自身的消息
         if event.get_sender_id() == event.get_self_id():
             return
 
+        # 逻辑1: 检查是否处于沉浸式对话模式
         if self.config.get('enable_immersive_chat', True) and group_id in self.direct_reply_groups:
             logger.info(f"[沉浸式对话] 检测到群 {group_id} 的直接回复消息，触发LLM。")
-            self.direct_reply_groups.remove(group_id)
-            event.stop_event()
+            self.direct_reply_groups.remove(group_id) # 仅生效一次
+            event.stop_event() # 阻止默认的LLM调用流程，使用我们自己的请求
             yield event.request_llm(prompt=event.message_str)
-            return
+            return # 处理完毕，直接返回
 
+        # 逻辑2: 如果有主动插话计时器在运行，则记录消息
         if self.config.get('enable_proactive_reply', True) and group_id in self.active_timers:
-            sender_name = event.get_sender_name()
-            message_text = event.message_str
+            sender_name = event.get_sender_name() or event.get_sender_id()
+            message_text = event.message_str.strip()
             if message_text:
+                # 速率限制，防止短时间消息过多刷爆缓冲区
+                if len(self.group_chat_buffer[group_id]) > 20:
+                    logger.info(f"群 {group_id} 消息缓冲已达上限，跳过处理")
+                    return
                 self.group_chat_buffer[group_id].append(f"{sender_name}: {message_text}")
 
     # -----------------------------------------------------

@@ -157,7 +157,7 @@ class ReplyDirectlyPlugin(Star):
                     logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
                     # 使用 from astrbot.api.event import MessageChain 也是可以的
                     message_chain = MessageChain().message(content)
-                    await self.context.send_message(event.unified_msg_origin, message_chain)
+                    await self.context.send_message(unified_msg_origin, message_chain) 
                 else:
                     logger.info("[主动插话] LLM判断无需回复。")
 

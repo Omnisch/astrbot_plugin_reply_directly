@@ -54,7 +54,7 @@ class ReplyDirectlyPlugin(Star):
     @filter.llm_tool()
     async def enable_direct_reply_once(self, event: AstrMessageEvent):
         """
-        当LLM认为可以开启沉浸式对话时调用此函数。这会让机器人在该群组的下一条消息时直接回复，无需@。此效果仅生效一次。
+        当 LLM 认为可以开启沉浸式对话时调用此函数。这会让机器人在该群组的下一条消息时直接回复，无需 @。此效果仅生效一次。
         """
         if not self.config.get('enable_immersive_chat', True):
             return
@@ -68,7 +68,7 @@ class ReplyDirectlyPlugin(Star):
             uid = event.unified_msg_origin
             curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
             if not curr_cid:
-                logger.warning(f"[沉浸式对话] 无法获取群 {group_id} 的当前会话ID，无法保存上下文。")
+                logger.warning(f"[沉浸式对话] 无法获取群 {group_id} 的当前会话 ID，无法保存上下文。")
                 return
             
             conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid)
@@ -122,14 +122,14 @@ class ReplyDirectlyPlugin(Star):
                     logger.debug(f"[主动插话] 群 {group_id} 在 {delay}s 内无新消息，继续监听。")
                     continue # [修改] 如果没消息，直接进入下一次sleep
 
-                logger.info(f"[主动插话] 群 {group_id} 计时结束，收集到 {len(chat_history)} 条消息，开始请求LLM判断。")
-                
+                logger.info(f"[主动插话] 群 {group_id} 计时结束，收集到 {len(chat_history)} 条消息，开始请求 LLM 判断。")
+
                 formatted_history = "\n".join(chat_history)
                 prompt = (
                     f"我在一个群聊里，在我说完话后，群里发生了以下的对话：\n"
                     f"--- 对话记录 ---\n{formatted_history}\n--- 对话记录结束 ---\n"
-                    f"请判断我是否应该插话。请严格按照JSON格式在```json ... ```代码块中回答，不要有任何其他说明文字。\n"
-                    f'格式示例：\n```json\n{{"should_reply": true, "content": "你的回复内容"}}\n```\n'
+                    f"请判断我是否应该插话。请严格按照 JSON 格式在```json ... ```代码块中回答，不要有任何其他说明文字。\n"
+                    f'格式示例：\n```json\n{{"should_reply": true, "content": "<REPLY_CONTENT>"}}\n```\n'
                     f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
                 )
 
@@ -142,7 +142,7 @@ class ReplyDirectlyPlugin(Star):
                 
                 json_string = self._extract_json_from_text(llm_response.completion_text)
                 if not json_string:
-                    logger.warning(f"[主动插话] 从LLM回复中未能提取出JSON。原始回复: {llm_response.completion_text}")
+                    logger.warning(f"[主动插话] 从 LLM 回复中未能提取出 JSON。原始回复: {llm_response.completion_text}")
                     continue
 
                 try:
@@ -151,13 +151,13 @@ class ReplyDirectlyPlugin(Star):
                     content = decision_data.get("content", "")
 
                     if should_reply and content:
-                        logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
+                        logger.info(f"[主动插话] LLM 判断需要回复，内容: {content[:50]}...")
                         message_chain = MessageChain().message(content)
                         await self.context.send_message(unified_msg_origin, message_chain) 
                     else:
-                        logger.info("[主动插话] LLM判断无需回复。")
+                        logger.info("[主动插话] LLM 判断无需回复。")
                 except (json.JSONDecodeError, TypeError, AttributeError) as e:
-                    logger.error(f"[主动插话] 解析LLM的JSON回复失败: {e}\n原始回复: {llm_response.completion_text}\n清理后文本: '{json_string}'")
+                    logger.error(f"[主动插话] 解析 LLM 的 JSON 回复失败: {e}\n原始回复: {llm_response.completion_text}\n清理后文本: '{json_string}'")
         
         except asyncio.CancelledError:
             logger.info(f"[主动插话] 群 {group_id} 的循环检测任务被取消。")
@@ -183,7 +183,7 @@ class ReplyDirectlyPlugin(Star):
 
         # 逻辑1: [增强] 检查是否处于沉浸式对话模式
         if self.config.get('enable_immersive_chat', True) and group_id in self.direct_reply_context:
-            logger.info(f"[沉浸式对话] 检测到群 {group_id} 的直接回复消息，将携带上下文触发LLM。")
+            logger.info(f"[沉浸式对话] 检测到群 {group_id} 的直接回复消息，将携带上下文触发 LLM。")
             
             # [修改] 弹出保存的上下文信息
             saved_data = self.direct_reply_context.pop(group_id)
@@ -216,10 +216,10 @@ class ReplyDirectlyPlugin(Star):
 
     async def terminate(self):
         """插件被卸载/停用时调用，用于清理"""
-        logger.info("正在卸载ReplyDirectly插件，取消所有后台循环任务...")
+        logger.info("正在卸载 ReplyDirectly 插件，取消所有后台循环任务...")
         for task in self.active_timers.values():
             task.cancel()
         self.active_timers.clear()
         self.group_chat_buffer.clear()
         self.direct_reply_context.clear()
-        logger.info("ReplyDirectly插件所有后台任务已清理。")
+        logger.info("ReplyDirectly 插件所有后台任务已清理。")

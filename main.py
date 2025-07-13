@@ -12,7 +12,7 @@ import astrbot.api.message_components as Comp
 @register(
     "reply_directly",
     "qa296",
-    "提供沉浸式对话和主动插话功能，让机器人更智能地参与群聊。",
+    "让您的 AstrBot 在群聊中变得更加生动和智能！本插件赋予了机器人两种强大的能力：沉浸式对话和主动插话，使其不再是一个被动等待指令的工具，而是一个能主动参与、自然融入群聊的“虚拟伙伴”。",
     "1.0.1", # 版本号+1
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )

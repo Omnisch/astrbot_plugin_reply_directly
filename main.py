@@ -99,11 +99,11 @@ class ReplyDirectlyPlugin(Star):
                 if conversation and conversation.history:
                     context = json.loads(conversation.history)
 
-            # 获取用户自定义系统提示词
-            system_prompt = self.config.get('proactive_reply_system_prompt', "")
+            user_system_prompt = self.config.get('proactive_reply_system_prompt', '')
 
-            prompt = (
-                f"请根据上下文并结合你的角色判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n"
+            system_prompt = (
+                f'{user_system_prompt}\n'
+                f'请根据上下文并结合你的角色判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n'
                 f'格式示例：\n```json\n{{"should_reply": true}}\n```\n'
                 f'或\n```json\n{{"should_reply": false}}\n```'
             )
@@ -114,7 +114,7 @@ class ReplyDirectlyPlugin(Star):
                 return
 
             llm_response = await provider.text_chat(
-                prompt=prompt,
+                prompt=event.message_str,
                 contexts=context,
                 system_prompt=system_prompt
             )
@@ -138,7 +138,7 @@ class ReplyDirectlyPlugin(Star):
                         func_tool_manager=func_tool_mgr,
                         session_id=curr_cid,
                         contexts=context,
-                        system_prompt=system_prompt,
+                        system_prompt="",
                         conversation=conversation
                     )
                 else:

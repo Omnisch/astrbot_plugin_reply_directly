@@ -86,7 +86,7 @@ class ReplyDirectlyPlugin(Star):
     # Feature 2: 主动插话 (Proactive Interjection) - [已重构]
     # -----------------------------------------------------
 
-    async def _proactive_check_task(self, group_id: str, uid: str):
+    async def _proactive_check_task(self, group_id: str, event: AstrMessageEvent):
         """检测是否需要主动插话"""
         try:
             logger.info(f"[主动插话] 群 {group_id} 开始请求 LLM 判断。")
@@ -94,11 +94,11 @@ class ReplyDirectlyPlugin(Star):
             func_tool_mgr = self.context.get_llm_tool_manager()
 
             # 获取用户当前与 LLM 的对话以获得上下文信息
-            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
+            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
             conversation = None
             context = []
             if curr_cid:
-                conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid)
+                conversation = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, curr_cid)
                 if conversation and conversation.history:
                     context = json.loads(conversation.history)
 
@@ -107,8 +107,8 @@ class ReplyDirectlyPlugin(Star):
 
             prompt = (
                 f"请根据上下文并结合你的角色判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n"
-                f'格式示例：\n```json\n{{"should_reply": true, "content": "<REPLY_CONTENT>"}}\n```\n'
-                f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
+                f'格式示例：\n```json\n{{"should_reply": true}}\n```\n'
+                f'或\n```json\n{{"should_reply": false}}\n```'
             )
 
             provider = self.context.get_using_provider()
@@ -131,21 +131,22 @@ class ReplyDirectlyPlugin(Star):
             try:
                 decision_data = json.loads(json_string)
                 should_reply = decision_data.get("should_reply", False)
-                content = decision_data.get("content", "")
 
-                if should_reply and content:
-                    logger.info(f"[主动插话] LLM 判断需要回复，内容: {content[:50]}...")
-                    message_chain = MessageChain().message(content)
-                    await self.context.send_message(uid, message_chain)
+                if should_reply:
+                    logger.info(f"[主动插话] LLM 判断需要回复。")
+                    yield event.request_llm(
+                        prompt=event.message_str,
+                        session_id=curr_cid,
+                        contexts=context,
+                        system_prompt=system_prompt
+                    )
                 else:
                     logger.info("[主动插话] LLM 判断无需回复。")
             except (json.JSONDecodeError, TypeError, AttributeError) as e:
                 logger.error(f"[主动插话] 解析 LLM 的 JSON 回复失败: {e}\n原始回复: {llm_response.completion_text}\n清理后文本: '{json_string}'")
         
-        except asyncio.CancelledError:
-            logger.info(f"[主动插话] 群 {group_id} 的循环检测任务被取消。")
         except Exception as e:
-            logger.error(f"[主动插话] 群 {group_id} 的循环检测任务出现未知异常: {e}", exc_info=True)
+            logger.error(f"[主动插话] 群 {group_id} 的检测任务出现未知异常: {e}", exc_info=True)
 
     # -----------------------------------------------------
     # 统一的消息监听器 - [已修改]
@@ -189,7 +190,7 @@ class ReplyDirectlyPlugin(Star):
             self.active_counters[group_id] += 1
             
             if self.active_counters[group_id] >= self.config.get('proactive_reply_interval', 8):
-                self.active_task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
+                self.active_task = asyncio.create_task(self._proactive_check_task(group_id, event))
                 logger.info(f"[主动插话] 群 {group_id} 的消息计数已达到 {self.active_counters[group_id]}。")
                 self.active_counters[group_id] = 0
 

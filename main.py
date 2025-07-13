@@ -1,13 +1,11 @@
 import asyncio
 import json
 import re
-from collections import defaultdict
 
+from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import MessageChain
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger, AstrBotConfig
-import astrbot.api.message_components as Comp
 
 @register(
     "reply_directly",
@@ -24,15 +22,15 @@ class ReplyDirectlyPlugin(Star):
             'enable_plugin': True,
             'enable_immersive_chat': True,
             'enable_proactive_reply': True,
-            'proactive_reply_delay': 8
+            'proactive_reply_interval': 8
         }
         self.config = {**self.default_config, **config}
 
-        # [修改] 沉浸式对话：从set改为dict，用于存储上下文
-        self.direct_reply_context = {} 
-        # 主动插话：active_timers存储后台的循环任务
-        self.active_timers = {}
-        self.group_chat_buffer = defaultdict(list)
+        # [修改] 沉浸式对话：从 set 改为 dict，用于存储上下文
+        self.direct_reply_context = {}
+        # 主动插话：active_counters 存储后台的计数器
+        self.active_counters = {}
+        self.active_task = None
         logger.info("ReplyDirectly插件 v1.1.0 加载成功！")
 
     def _extract_json_from_text(self, text: str) -> str:
@@ -87,85 +85,63 @@ class ReplyDirectlyPlugin(Star):
     # Feature 2: 主动插话 (Proactive Interjection) - [已重构]
     # -----------------------------------------------------
 
-    @filter.after_message_sent()
-    async def after_bot_message_sent(self, event: AstrMessageEvent):
-        """机器人发送消息后，重置主动插话的计时器"""
-        if not self.config.get('enable_plugin', True) or not self.config.get('enable_proactive_reply', True):
-            return
-        if event.is_private_chat():
-            return
-        
-        group_id = event.get_group_id()
-        if not group_id:
-            return
-
-        # [修改] 逻辑变为：取消旧任务，并立即启动一个新任务，实现计时器重置
-        if group_id in self.active_timers:
-            self.active_timers[group_id].cancel()
-            logger.debug(f"[主动插话] 取消了群 {group_id} 的旧计时器。")
-
-        self.group_chat_buffer[group_id].clear()
-        task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
-        self.active_timers[group_id] = task
-        logger.info(f"[主动插话] 机器人发言，已为群 {group_id} 重置主动插话计时器。")
-
-    async def _proactive_check_task(self, group_id: str, unified_msg_origin: str):
-        """[修改] 循环检测任务，不再是一次性"""
+    async def _proactive_check_task(self, group_id: str, uid: str):
+        """检测是否需要主动插话"""
         try:
-            while True: # [新增] 进入无限循环
-                delay = self.config.get('proactive_reply_delay', 8)
-                await asyncio.sleep(delay)
+            logger.info(f"[主动插话] 群 {group_id} 开始请求 LLM 判断。")
 
-                chat_history = self.group_chat_buffer.pop(group_id, [])
-                
-                if not chat_history:
-                    logger.debug(f"[主动插话] 群 {group_id} 在 {delay}s 内无新消息，继续监听。")
-                    continue # [修改] 如果没消息，直接进入下一次sleep
+            func_tool_mgr = self.context.get_llm_tool_manager()
 
-                logger.info(f"[主动插话] 群 {group_id} 计时结束，收集到 {len(chat_history)} 条消息，开始请求 LLM 判断。")
+            # 获取用户当前与 LLM 的对话以获得上下文信息
+            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
+            conversation = None
+            context = []
+            if curr_cid:
+                conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid)
+                if conversation and conversation.history:
+                    context = json.loads(conversation.history)
 
-                formatted_history = "\n".join(chat_history)
-                prompt = (
-                    f"我在一个群聊里，在我说完话后，群里发生了以下的对话：\n"
-                    f"--- 对话记录 ---\n{formatted_history}\n--- 对话记录结束 ---\n"
-                    f"请判断我是否应该插话。请严格按照 JSON 格式在```json ... ```代码块中回答，不要有任何其他说明文字。\n"
-                    f'格式示例：\n```json\n{{"should_reply": true, "content": "<REPLY_CONTENT>"}}\n```\n'
-                    f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
-                )
+            prompt = (
+                f"在生成回复前，根据上下文判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n"
+                f'格式示例：\n```json\n{{"should_reply": true, "content": "<REPLY_CONTENT>"}}\n```\n'
+                f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
+            )
 
-                provider = self.context.get_using_provider()
-                if not provider:
-                    logger.warning("[主动插话] 未找到可用的大语言模型提供商。")
-                    continue
+            provider = self.context.get_using_provider()
+            if not provider:
+                logger.warning("[主动插话] 未找到可用的大语言模型提供商。")
+                return
 
-                llm_response = await provider.text_chat(prompt=prompt)
-                
-                json_string = self._extract_json_from_text(llm_response.completion_text)
-                if not json_string:
-                    logger.warning(f"[主动插话] 从 LLM 回复中未能提取出 JSON。原始回复: {llm_response.completion_text}")
-                    continue
+            llm_response = await provider.text_chat(
+                prompt=prompt,
+                contexts=context,
+                func_tool=func_tool_mgr,
+                system_prompt=""
+            )
+            
+            json_string = self._extract_json_from_text(llm_response.completion_text)
+            if not json_string:
+                logger.warning(f"[主动插话] 从 LLM 回复中未能提取出 JSON。原始回复: {llm_response.completion_text}")
+                return
 
-                try:
-                    decision_data = json.loads(json_string)
-                    should_reply = decision_data.get("should_reply", False)
-                    content = decision_data.get("content", "")
+            try:
+                decision_data = json.loads(json_string)
+                should_reply = decision_data.get("should_reply", False)
+                content = decision_data.get("content", "")
 
-                    if should_reply and content:
-                        logger.info(f"[主动插话] LLM 判断需要回复，内容: {content[:50]}...")
-                        message_chain = MessageChain().message(content)
-                        await self.context.send_message(unified_msg_origin, message_chain) 
-                    else:
-                        logger.info("[主动插话] LLM 判断无需回复。")
-                except (json.JSONDecodeError, TypeError, AttributeError) as e:
-                    logger.error(f"[主动插话] 解析 LLM 的 JSON 回复失败: {e}\n原始回复: {llm_response.completion_text}\n清理后文本: '{json_string}'")
+                if should_reply and content:
+                    logger.info(f"[主动插话] LLM 判断需要回复，内容: {content[:50]}...")
+                    message_chain = MessageChain().message(content)
+                    await self.context.send_message(self.event.unified_msg_origin, message_chain) 
+                else:
+                    logger.info("[主动插话] LLM 判断无需回复。")
+            except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                logger.error(f"[主动插话] 解析 LLM 的 JSON 回复失败: {e}\n原始回复: {llm_response.completion_text}\n清理后文本: '{json_string}'")
         
         except asyncio.CancelledError:
             logger.info(f"[主动插话] 群 {group_id} 的循环检测任务被取消。")
         except Exception as e:
             logger.error(f"[主动插话] 群 {group_id} 的循环检测任务出现未知异常: {e}", exc_info=True)
-        finally:
-            self.active_timers.pop(group_id, None)
-            self.group_chat_buffer.pop(group_id, None)
 
     # -----------------------------------------------------
     # 统一的消息监听器 - [已修改]
@@ -201,25 +177,23 @@ class ReplyDirectlyPlugin(Star):
 
         # 逻辑2: [修改] 为主动插话功能提供支持
         if self.config.get('enable_proactive_reply', True):
-            # 如果没有计时器，说明是新活跃的群，启动一个
-            if group_id not in self.active_timers:
-                logger.info(f"[主动插话] 检测到群 {group_id} 新消息，首次启动循环检测任务。")
-                task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
-                self.active_timers[group_id] = task
+            # 如果没有计数器，说明是新活跃的群，启动一个
+            if group_id not in self.active_counters:
+                logger.info(f"[主动插话] 检测到群 {group_id} 新消息，启动消息计数。")
+                self.active_counters[group_id] = 0
 
-            # 记录消息到缓冲区
-            sender_name = event.get_sender_name() or event.get_sender_id()
-            message_text = event.message_str.strip()
-            if message_text:
-                if len(self.group_chat_buffer[group_id]) < 20: # 速率限制
-                    self.group_chat_buffer[group_id].append(f"{sender_name}: {message_text}")
+            self.active_counters[group_id] += 1
+            
+            if self.active_counters[group_id] >= self.config.get('proactive_reply_interval', 8):
+                self.active_task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
+                logger.info(f"[主动插话] 群 {group_id} 的消息计数已达到 {self.active_counters[group_id]}。")
+                self.active_counters[group_id] = 0
+
 
     async def terminate(self):
         """插件被卸载/停用时调用，用于清理"""
         logger.info("正在卸载 ReplyDirectly 插件，取消所有后台循环任务...")
-        for task in self.active_timers.values():
-            task.cancel()
-        self.active_timers.clear()
-        self.group_chat_buffer.clear()
+        self.active_task.cancel()
+        self.active_counters.clear()
         self.direct_reply_context.clear()
         logger.info("ReplyDirectly 插件所有后台任务已清理。")

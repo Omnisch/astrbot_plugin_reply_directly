@@ -17,6 +17,12 @@
     "default": true,
     "hint": "允许机器人在发言后，根据后续的聊天内容判断是否主动插话。"
   },
+  "proactive_reply_system_prompt": {
+    "description": "主动插话系统提示词",
+    "type": "string",
+    "default": "你是一个 AI 助手，负责在群聊中提供有用的回复。请根据上下文判断是否需要主动插话。",
+    "hint": "此提示词将用于指导 LLM 每次主动插话的行为。"
+  },
   "proactive_reply_interval": {
     "description": "主动插话间隔消息（条）",
     "type": "int",

@@ -22,6 +22,7 @@ class ReplyDirectlyPlugin(Star):
             'enable_plugin': True,
             'enable_immersive_chat': True,
             'enable_proactive_reply': True,
+            'proactive_reply_system_prompt': "",
             'proactive_reply_interval': 8
         }
         self.config = {**self.default_config, **config}
@@ -101,8 +102,11 @@ class ReplyDirectlyPlugin(Star):
                 if conversation and conversation.history:
                     context = json.loads(conversation.history)
 
+            # 获取用户自定义系统提示词
+            system_prompt = self.config.get('proactive_reply_system_prompt', "")
+
             prompt = (
-                f"在生成回复前，根据上下文判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n"
+                f"请根据上下文并结合你的角色判断你是否应该说话。严格按照 JSON 格式在```json ... ```代码块中回答，禁止任何其他说明文字。\n"
                 f'格式示例：\n```json\n{{"should_reply": true, "content": "<REPLY_CONTENT>"}}\n```\n'
                 f'或\n```json\n{{"should_reply": false, "content": ""}}\n```'
             )
@@ -116,7 +120,7 @@ class ReplyDirectlyPlugin(Star):
                 prompt=prompt,
                 contexts=context,
                 func_tool=func_tool_mgr,
-                system_prompt=""
+                system_prompt=system_prompt
             )
             
             json_string = self._extract_json_from_text(llm_response.completion_text)

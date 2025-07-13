@@ -14,20 +14,16 @@ import astrbot.api.message_components as Comp
     "reply_directly",
     "qa296",
     "让您的 AstrBot 在群聊中变得更加生动和智能！本插件使其可以主动的连续交互。",
-    "1.2.0",  # 版本号建议更新
+    "1.2.0",
     "https://github.com/qa296/astrbot_plugin_reply_directly"
 )
 class ReplyDirectlyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
-        # AstrBot会自动根据 _conf_schema.json 处理配置和默认值
         self.config = config
-
-        # 使用asyncio.Lock来防止竞争条件
         self.immersive_lock = Lock()
         self.group_task_lock = Lock()
-
         self.direct_reply_context = {} 
         self.active_timers = {}
         self.group_chat_buffer = defaultdict(list)
@@ -47,7 +43,7 @@ class ReplyDirectlyPlugin(Star):
         return text.strip()
 
     # -----------------------------------------------------
-    # Feature 1: 沉浸式对话 (Immersive Chat)
+    # Feature 1: 沉浸式对话 (Immersive Chat) - 无需修改
     # -----------------------------------------------------
 
     @filter.llm_tool()
@@ -83,8 +79,23 @@ class ReplyDirectlyPlugin(Star):
 
 
     # -----------------------------------------------------
-    # Feature 2: 主动插话 (Proactive Interjection)
+    # Feature 2: 主动插话 (Proactive Interjection) - 【核心修改区域】
     # -----------------------------------------------------
+
+    # 【新增】一个辅助函数，用于封装启动/重置检查任务的逻辑
+    async def _start_proactive_check(self, group_id: str, unified_msg_origin: str):
+        """辅助函数，用于启动或重置一个群组的主动插话检查任务。"""
+        async with self.group_task_lock:
+            # 如果已有计时器，取消它
+            if group_id in self.active_timers:
+                self.active_timers[group_id].cancel()
+                logger.debug(f"[主动插话] 取消了群 {group_id} 的旧计时器。")
+
+            # 清空该群的聊天缓冲区，并启动新的检查任务
+            self.group_chat_buffer[group_id].clear()
+            task = asyncio.create_task(self._proactive_check_task(group_id, unified_msg_origin))
+            self.active_timers[group_id] = task
+        logger.info(f"[主动插话] 已为群 {group_id} 启动/重置了延时检查任务。")
 
     @filter.after_message_sent()
     async def after_bot_message_sent(self, event: AstrMessageEvent):
@@ -98,17 +109,8 @@ class ReplyDirectlyPlugin(Star):
         if not group_id:
             return
 
-        async with self.group_task_lock:
-            # 如果已有计时器，取消它
-            if group_id in self.active_timers:
-                self.active_timers[group_id].cancel()
-                logger.debug(f"[主动插话] 取消了群 {group_id} 的旧计时器。")
-
-            # 清空该群的聊天缓冲区，并启动新的检查任务
-            self.group_chat_buffer[group_id].clear()
-            task = asyncio.create_task(self._proactive_check_task(group_id, event.unified_msg_origin))
-            self.active_timers[group_id] = task
-        logger.info(f"[主动插话] 机器人发言，已为群 {group_id} 设置了延时检查任务。")
+        # 【修改】调用新的辅助函数来处理任务启动，使代码更简洁
+        await self._start_proactive_check(group_id, event.unified_msg_origin)
 
     async def _proactive_check_task(self, group_id: str, unified_msg_origin: str):
         """延时任务，在指定时间后检查一次是否需要主动插话。"""
@@ -157,6 +159,11 @@ class ReplyDirectlyPlugin(Star):
                     logger.info(f"[主动插话] LLM判断需要回复，内容: {content[:50]}...")
                     message_chain = MessageChain().message(content)
                     await self.context.send_message(unified_msg_origin, message_chain) 
+                    
+                    # 【核心修改】在成功插话后，立即调用辅助函数，重新启动新一轮的检测，形成循环！
+                    logger.info(f"[主动插话] 插话成功，为群 {group_id} 重新启动检测。")
+                    await self._start_proactive_check(group_id, unified_msg_origin)
+                    
                 else:
                     logger.info("[主动插话] LLM判断无需回复。")
             except (json.JSONDecodeError, TypeError, AttributeError) as e:
@@ -172,7 +179,7 @@ class ReplyDirectlyPlugin(Star):
                     self.active_timers.pop(group_id, None)
 
     # -----------------------------------------------------
-    # 统一的消息监听器
+    # 统一的消息监听器 - 无需修改
     # -----------------------------------------------------
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)

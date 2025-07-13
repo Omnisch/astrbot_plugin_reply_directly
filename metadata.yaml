@@ -1,5 +1,5 @@
 name: astrbot_plugin_reply_directly
 author: qa296
 version: 1.0.1
-description: "一个智能回复插件，可以让LLM决定在特定情境下主动回复用户，或在自己发言后进行反思追问。"
+description: "让您的 AstrBot 在群聊中变得更加生动和智能！本插件赋予了机器人两种强大的能力：沉浸式对话和主动插话，使其不再是一个被动等待指令的工具，而是一个能主动参与、自然融入群聊的“虚拟伙伴”。"
 repo: https://github.com/qa296/astrbot_plugin_reply_directly

@@ -132,7 +132,7 @@ class ReplyDirectlyPlugin(Star):
                 if should_reply and content:
                     logger.info(f"[主动插话] LLM 判断需要回复，内容: {content[:50]}...")
                     message_chain = MessageChain().message(content)
-                    await self.context.send_message(self.event.unified_msg_origin, message_chain) 
+                    await self.context.send_message(uid, message_chain)
                 else:
                     logger.info("[主动插话] LLM 判断无需回复。")
             except (json.JSONDecodeError, TypeError, AttributeError) as e:
@@ -193,7 +193,8 @@ class ReplyDirectlyPlugin(Star):
     async def terminate(self):
         """插件被卸载/停用时调用，用于清理"""
         logger.info("正在卸载 ReplyDirectly 插件，取消所有后台循环任务...")
-        self.active_task.cancel()
+        if self.active_task:
+            self.active_task.cancel()
         self.active_counters.clear()
         self.direct_reply_context.clear()
         logger.info("ReplyDirectly 插件所有后台任务已清理。")

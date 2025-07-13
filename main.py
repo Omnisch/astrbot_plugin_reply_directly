@@ -31,7 +31,6 @@ class ReplyDirectlyPlugin(Star):
         self.direct_reply_context = {}
         # 主动插话：active_counters 存储后台的计数器
         self.active_counters = {}
-        self.active_task = None
         logger.info("ReplyDirectly插件 v1.1.0 加载成功！")
 
     def _extract_json_from_text(self, text: str) -> str:
@@ -91,8 +90,6 @@ class ReplyDirectlyPlugin(Star):
         try:
             logger.info(f"[主动插话] 群 {group_id} 开始请求 LLM 判断。")
 
-            func_tool_mgr = self.context.get_llm_tool_manager()
-
             # 获取用户当前与 LLM 的对话以获得上下文信息
             curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
             conversation = None
@@ -119,7 +116,6 @@ class ReplyDirectlyPlugin(Star):
             llm_response = await provider.text_chat(
                 prompt=prompt,
                 contexts=context,
-                func_tool=func_tool_mgr,
                 system_prompt=system_prompt
             )
             
@@ -134,11 +130,16 @@ class ReplyDirectlyPlugin(Star):
 
                 if should_reply:
                     logger.info(f"[主动插话] LLM 判断需要回复。")
+
+                    func_tool_mgr = self.context.get_llm_tool_manager()
+
                     yield event.request_llm(
                         prompt=event.message_str,
+                        func_tool_manager=func_tool_mgr,
                         session_id=curr_cid,
                         contexts=context,
-                        system_prompt=system_prompt
+                        system_prompt=system_prompt,
+                        conversation=conversation
                     )
                 else:
                     logger.info("[主动插话] LLM 判断无需回复。")
@@ -190,16 +191,14 @@ class ReplyDirectlyPlugin(Star):
             self.active_counters[group_id] += 1
             
             if self.active_counters[group_id] >= self.config.get('proactive_reply_interval', 8):
-                self.active_task = asyncio.create_task(self._proactive_check_task(group_id, event))
                 logger.info(f"[主动插话] 群 {group_id} 的消息计数已达到 {self.active_counters[group_id]}。")
+                async for task in self._proactive_check_task(group_id, event):
+                    yield task
                 self.active_counters[group_id] = 0
 
 
     async def terminate(self):
         """插件被卸载/停用时调用，用于清理"""
-        logger.info("正在卸载 ReplyDirectly 插件，取消所有后台循环任务...")
-        if self.active_task:
-            self.active_task.cancel()
         self.active_counters.clear()
         self.direct_reply_context.clear()
-        logger.info("ReplyDirectly 插件所有后台任务已清理。")
+        logger.info("ReplyDirectly 插件所有后台数据已清理。")

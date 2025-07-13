@@ -3,8 +3,8 @@ import json
 import re
 
 from astrbot.api import logger, AstrBotConfig
-from astrbot.api.event import MessageChain
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
 @register(
@@ -99,6 +99,12 @@ class ReplyDirectlyPlugin(Star):
                 if conversation and conversation.history:
                     context = json.loads(conversation.history)
 
+            # 获取消息中的图片链接
+            image_urls = []
+            for msg_component in event.get_messages():
+                if isinstance(msg_component, Image) and hasattr(msg_component, 'url') and msg_component.url:
+                    image_urls.append(msg_component.url)
+
             user_system_prompt = self.config.get('proactive_reply_system_prompt', '')
 
             system_prompt = (
@@ -113,10 +119,12 @@ class ReplyDirectlyPlugin(Star):
                 logger.warning("[主动插话] 未找到可用的大语言模型提供商。")
                 return
 
+            # 发送判断请求到 LLM
             llm_response = await provider.text_chat(
                 prompt=event.message_str,
                 contexts=context,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                image_urls=image_urls
             )
             
             json_string = self._extract_json_from_text(llm_response.completion_text)
@@ -139,6 +147,7 @@ class ReplyDirectlyPlugin(Star):
                         session_id=curr_cid,
                         contexts=context,
                         system_prompt="",
+                        image_urls=image_urls,
                         conversation=conversation
                     )
                 else:

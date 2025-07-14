@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-from collections import defaultdict
 from asyncio import Lock
 
 from astrbot.api import logger, AstrBotConfig
@@ -9,7 +8,6 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
-import astrbot.api.message_components as Comp
 
 
 @register(
@@ -204,17 +202,18 @@ class ReplyDirectlyPlugin(Star):
 
         # 逻辑2: 为主动插话功能提供支持
         if self.config.get('enable_proactive_reply', True):
-            if group_id not in self.active_counters:
-                logger.info(f"[主动插话] 检测到群 {group_id} 新消息，启动消息计数。")
-                self.active_counters[group_id] = 0
+            async with self.group_task_lock:
+                if group_id not in self.active_counters:
+                    logger.info(f"[主动插话] 检测到群 {group_id} 新消息，启动消息计数。")
+                    self.active_counters[group_id] = 0
 
-            self.active_counters[group_id] += 1
-            
-            if self.active_counters[group_id] >= self.config.get('proactive_reply_interval', 8):
-                logger.info(f"[主动插话] 群 {group_id} 的消息计数已达到 {self.active_counters[group_id]}。")
-                async for task in self._proactive_check_task(group_id, event):
-                    yield task
-                self.active_counters[group_id] = 0
+                self.active_counters[group_id] += 1
+                
+                if self.active_counters[group_id] >= self.config.get('proactive_reply_interval', 8):
+                    logger.info(f"[主动插话] 群 {group_id} 的消息计数已达到 {self.active_counters[group_id]}。")
+                    async for task in self._proactive_check_task(group_id, event):
+                        yield task
+                    self.active_counters[group_id] = 0
 
 
     async def terminate(self):
